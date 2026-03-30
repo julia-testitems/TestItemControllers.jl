@@ -6,7 +6,7 @@ Mutable state for a single test process managed by the reactor.
 mutable struct TestProcessState
     id::String
     fsm::FSM{TestProcessPhase}
-    env::TestEnvironment
+    env::ProcessEnv
     testrun_id::Union{Nothing,String}
     jl_process::Union{Nothing,Base.Process}
     endpoint::Union{Nothing,JSONRPC.JSONRPCEndpoint}
@@ -30,7 +30,7 @@ mutable struct TestProcessState
     proc_log_level::Symbol
 end
 
-function TestProcessState(id::String, env::TestEnvironment;
+function TestProcessState(id::String, env::ProcessEnv;
         is_precompile_process::Bool=false,
         precompile_done::Bool=false,
         test_env_content_hash=nothing)
@@ -68,10 +68,14 @@ Mutable state for a single test run managed by the reactor.
 mutable struct TestRunState
     id::String
     fsm::FSM{TestRunPhase}
-    profiles::Vector{TestProfile}
-    remaining_items::Dict{String,TestItemDetail}   # id → item (not yet completed)
+    test_environments::Vector{TestEnvironment}
+    env_by_id::Dict{String,TestEnvironment}
+    remaining_work::Dict{Tuple{String,String},TestRunItem}  # (testitem_id, test_env_id) → work unit
+    test_items::Dict{String,TestItemDetail}                 # lookup by testitem_id
     test_setups::Vector{TestSetupDetail}
-    procs::Union{Nothing,Dict{TestEnvironment,Vector{String}}}  # process IDs by env
+    max_processes::Int
+    coverage_root_uris::Union{Nothing,Vector{String}}
+    procs::Union{Nothing,Dict{ProcessEnv,Vector{String}}}   # process IDs by env
     testitem_ids_by_proc::Dict{String,Vector{String}}
     stolen_ids_by_proc::Dict{String,Vector{String}}
     items_dispatched_to_procs::Set{String}
@@ -83,21 +87,30 @@ end
 
 function TestRunState(
     id::String,
-    profiles::Vector{TestProfile},
+    test_environments::Vector{TestEnvironment},
     items::Vector{TestItemDetail},
-    test_setups::Vector{TestSetupDetail};
+    work_units::Vector{TestRunItem},
+    test_setups::Vector{TestSetupDetail},
+    max_processes::Int;
+    coverage_root_uris::Union{Nothing,Vector{String}}=nothing,
     token::Union{Nothing,CancellationTokens.CancellationToken}=nothing,
 )
     cancellation_source = token === nothing ?
         CancellationTokens.CancellationTokenSource() :
         CancellationTokens.CancellationTokenSource(token)
 
+    env_by_id = Dict(e.id => e for e in test_environments)
+
     return TestRunState(
         id,
         testrun_fsm(id),
-        profiles,
+        test_environments,
+        env_by_id,
+        Dict{Tuple{String,String},TestRunItem}((wu.testitem_id, wu.test_env_id) => wu for wu in work_units),
         Dict{String,TestItemDetail}(item.id => item for item in items),
         test_setups,
+        max_processes,
+        coverage_root_uris,
         nothing,                                    # procs
         Dict{String,Vector{String}}(),              # testitem_ids_by_proc
         Dict{String,Vector{String}}(),              # stolen_ids_by_proc
@@ -107,4 +120,16 @@ function TestRunState(
         cancellation_source,
         Channel{Any}(1),                            # completion_channel
     )
+end
+
+"""
+Resolve which TestEnvironment a ProcessEnv belongs to.
+"""
+function _resolve_test_env_id(tr::TestRunState, penv::ProcessEnv)::String
+    for env in tr.test_environments
+        if ProcessEnv(env) == penv
+            return env.id
+        end
+    end
+    error("No matching TestEnvironment for ProcessEnv")
 end

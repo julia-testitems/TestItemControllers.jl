@@ -110,29 +110,29 @@ end
     # Build createTestRun params
     testrun_id = string(UUIDs.uuid4())
 
-    profile = TestHelpers.make_test_profile()
+    test_env = TestHelpers.make_test_environment(; TestHelpers._env_kwargs(discovered)...)
 
     params = TestItemControllerProtocol.CreateTestRunParams(
         testRunId = testrun_id,
         testProfiles = [TestItemControllerProtocol.TestProfile(
-            id = profile.id,
-            label = profile.label,
-            juliaCmd = profile.julia_cmd,
-            juliaArgs = profile.julia_args,
-            juliaNumThreads = coalesce(profile.julia_num_threads, missing),
-            juliaEnv = profile.julia_env,
-            maxProcessCount = profile.max_process_count,
-            mode = profile.mode,
-            coverageRootUris = (profile.coverage_root_uris === nothing ? missing : profile.coverage_root_uris),
+            id = test_env.id,
+            label = "Test",
+            juliaCmd = test_env.julia_cmd,
+            juliaArgs = test_env.julia_args,
+            juliaNumThreads = coalesce(test_env.julia_num_threads, missing),
+            juliaEnv = test_env.julia_env,
+            maxProcessCount = 1,
+            mode = test_env.mode,
+            coverageRootUris = missing,
         )],
         testItems = [TestItemControllerProtocol.TestItemDetail(
             id = item.id,
             uri = item.uri,
             label = item.label,
-            packageName = (item.package_name === nothing ? missing : item.package_name),
-            packageUri = (item.package_uri === nothing ? missing : item.package_uri),
-            projectUri = (item.project_uri === nothing ? missing : item.project_uri),
-            envContentHash = (item.env_content_hash === nothing ? missing : item.env_content_hash),
+            packageName = (discovered.package_name === nothing ? missing : discovered.package_name),
+            packageUri = (discovered.package_uri === nothing ? missing : discovered.package_uri),
+            projectUri = (discovered.project_uri === nothing ? missing : discovered.project_uri),
+            envContentHash = (discovered.env_content_hash === nothing ? missing : discovered.env_content_hash),
             useDefaultUsings = item.option_default_imports,
             testSetups = item.test_setups,
             line = item.line,
@@ -140,7 +140,7 @@ end
             code = item.code,
             codeLine = item.code_line,
             codeColumn = item.code_column,
-            timeout = (item.timeout === nothing ? missing : item.timeout),
+            timeout = missing,
         ) for item in passing_items],
         testSetups = [TestItemControllerProtocol.TestSetupDetail(
             packageUri = s.package_uri,
@@ -234,26 +234,26 @@ end
     @test length(target_items) == 2
 
     testrun_id = string(UUIDs.uuid4())
-    profile = TestHelpers.make_test_profile()
+    test_env = TestHelpers.make_test_environment(; TestHelpers._env_kwargs(discovered)...)
 
     params = TestItemControllerProtocol.CreateTestRunParams(
         testRunId = testrun_id,
         testProfiles = [TestItemControllerProtocol.TestProfile(
-            id = profile.id, label = profile.label, juliaCmd = profile.julia_cmd,
-            juliaArgs = profile.julia_args, juliaNumThreads = coalesce(profile.julia_num_threads, missing),
-            juliaEnv = profile.julia_env, maxProcessCount = profile.max_process_count,
-            mode = profile.mode, coverageRootUris = (profile.coverage_root_uris === nothing ? missing : profile.coverage_root_uris),
+            id = test_env.id, label = "Test", juliaCmd = test_env.julia_cmd,
+            juliaArgs = test_env.julia_args, juliaNumThreads = coalesce(test_env.julia_num_threads, missing),
+            juliaEnv = test_env.julia_env, maxProcessCount = 1,
+            mode = test_env.mode, coverageRootUris = missing,
         )],
         testItems = [TestItemControllerProtocol.TestItemDetail(
             id = item.id, uri = item.uri, label = item.label,
-            packageName = (item.package_name === nothing ? missing : item.package_name),
-            packageUri = (item.package_uri === nothing ? missing : item.package_uri),
-            projectUri = (item.project_uri === nothing ? missing : item.project_uri),
-            envContentHash = (item.env_content_hash === nothing ? missing : item.env_content_hash),
+            packageName = (discovered.package_name === nothing ? missing : discovered.package_name),
+            packageUri = (discovered.package_uri === nothing ? missing : discovered.package_uri),
+            projectUri = (discovered.project_uri === nothing ? missing : discovered.project_uri),
+            envContentHash = (discovered.env_content_hash === nothing ? missing : discovered.env_content_hash),
             useDefaultUsings = item.option_default_imports, testSetups = item.test_setups,
             line = item.line, column = item.column, code = item.code,
             codeLine = item.code_line, codeColumn = item.code_column,
-            timeout = (item.timeout === nothing ? missing : item.timeout),
+            timeout = missing,
         ) for item in target_items],
         testSetups = [TestItemControllerProtocol.TestSetupDetail(
             packageUri = s.package_uri, name = s.name, kind = s.kind,
@@ -320,26 +320,26 @@ end
     passing_items = filter(i -> i.label == "add works", discovered.items)
 
     testrun_id = string(UUIDs.uuid4())
-    profile = TestHelpers.make_test_profile()
+    test_env = TestHelpers.make_test_environment(; TestHelpers._env_kwargs(discovered)...)
 
     params = TestItemControllerProtocol.CreateTestRunParams(
         testRunId = testrun_id,
         testProfiles = [TestItemControllerProtocol.TestProfile(
-            id = profile.id, label = profile.label, juliaCmd = profile.julia_cmd,
-            juliaArgs = profile.julia_args, juliaNumThreads = coalesce(profile.julia_num_threads, missing),
-            juliaEnv = profile.julia_env, maxProcessCount = profile.max_process_count,
-            mode = profile.mode, coverageRootUris = (profile.coverage_root_uris === nothing ? missing : profile.coverage_root_uris),
+            id = test_env.id, label = "Test", juliaCmd = test_env.julia_cmd,
+            juliaArgs = test_env.julia_args, juliaNumThreads = coalesce(test_env.julia_num_threads, missing),
+            juliaEnv = test_env.julia_env, maxProcessCount = 1,
+            mode = test_env.mode, coverageRootUris = missing,
         )],
         testItems = [TestItemControllerProtocol.TestItemDetail(
             id = item.id, uri = item.uri, label = item.label,
-            packageName = (item.package_name === nothing ? missing : item.package_name),
-            packageUri = (item.package_uri === nothing ? missing : item.package_uri),
-            projectUri = (item.project_uri === nothing ? missing : item.project_uri),
-            envContentHash = (item.env_content_hash === nothing ? missing : item.env_content_hash),
+            packageName = (discovered.package_name === nothing ? missing : discovered.package_name),
+            packageUri = (discovered.package_uri === nothing ? missing : discovered.package_uri),
+            projectUri = (discovered.project_uri === nothing ? missing : discovered.project_uri),
+            envContentHash = (discovered.env_content_hash === nothing ? missing : discovered.env_content_hash),
             useDefaultUsings = item.option_default_imports, testSetups = item.test_setups,
             line = item.line, column = item.column, code = item.code,
             codeLine = item.code_line, codeColumn = item.code_column,
-            timeout = (item.timeout === nothing ? missing : item.timeout),
+            timeout = missing,
         ) for item in passing_items],
         testSetups = [TestItemControllerProtocol.TestSetupDetail(
             packageUri = s.package_uri, name = s.name, kind = s.kind,
@@ -418,26 +418,26 @@ end
     @test length(output_items) == 1
 
     testrun_id = string(UUIDs.uuid4())
-    profile = TestHelpers.make_test_profile()
+    test_env = TestHelpers.make_test_environment(; TestHelpers._env_kwargs(discovered)...)
 
     params = TestItemControllerProtocol.CreateTestRunParams(
         testRunId = testrun_id,
         testProfiles = [TestItemControllerProtocol.TestProfile(
-            id = profile.id, label = profile.label, juliaCmd = profile.julia_cmd,
-            juliaArgs = profile.julia_args, juliaNumThreads = coalesce(profile.julia_num_threads, missing),
-            juliaEnv = profile.julia_env, maxProcessCount = profile.max_process_count,
-            mode = profile.mode, coverageRootUris = (profile.coverage_root_uris === nothing ? missing : profile.coverage_root_uris),
+            id = test_env.id, label = "Test", juliaCmd = test_env.julia_cmd,
+            juliaArgs = test_env.julia_args, juliaNumThreads = coalesce(test_env.julia_num_threads, missing),
+            juliaEnv = test_env.julia_env, maxProcessCount = 1,
+            mode = test_env.mode, coverageRootUris = missing,
         )],
         testItems = [TestItemControllerProtocol.TestItemDetail(
             id = item.id, uri = item.uri, label = item.label,
-            packageName = (item.package_name === nothing ? missing : item.package_name),
-            packageUri = (item.package_uri === nothing ? missing : item.package_uri),
-            projectUri = (item.project_uri === nothing ? missing : item.project_uri),
-            envContentHash = (item.env_content_hash === nothing ? missing : item.env_content_hash),
+            packageName = (discovered.package_name === nothing ? missing : discovered.package_name),
+            packageUri = (discovered.package_uri === nothing ? missing : discovered.package_uri),
+            projectUri = (discovered.project_uri === nothing ? missing : discovered.project_uri),
+            envContentHash = (discovered.env_content_hash === nothing ? missing : discovered.env_content_hash),
             useDefaultUsings = item.option_default_imports, testSetups = item.test_setups,
             line = item.line, column = item.column, code = item.code,
             codeLine = item.code_line, codeColumn = item.code_column,
-            timeout = (item.timeout === nothing ? missing : item.timeout),
+            timeout = missing,
         ) for item in output_items],
         testSetups = [TestItemControllerProtocol.TestSetupDetail(
             packageUri = s.package_uri, name = s.name, kind = s.kind,
@@ -499,26 +499,26 @@ end
     @test length(slow_items) == 1
 
     testrun_id = string(UUIDs.uuid4())
-    profile = TestHelpers.make_test_profile()
+    test_env = TestHelpers.make_test_environment(; TestHelpers._env_kwargs(discovered)...)
 
     params = TestItemControllerProtocol.CreateTestRunParams(
         testRunId = testrun_id,
         testProfiles = [TestItemControllerProtocol.TestProfile(
-            id = profile.id, label = profile.label, juliaCmd = profile.julia_cmd,
-            juliaArgs = profile.julia_args, juliaNumThreads = coalesce(profile.julia_num_threads, missing),
-            juliaEnv = profile.julia_env, maxProcessCount = profile.max_process_count,
-            mode = profile.mode, coverageRootUris = (profile.coverage_root_uris === nothing ? missing : profile.coverage_root_uris),
+            id = test_env.id, label = "Test", juliaCmd = test_env.julia_cmd,
+            juliaArgs = test_env.julia_args, juliaNumThreads = coalesce(test_env.julia_num_threads, missing),
+            juliaEnv = test_env.julia_env, maxProcessCount = 1,
+            mode = test_env.mode, coverageRootUris = missing,
         )],
         testItems = [TestItemControllerProtocol.TestItemDetail(
             id = item.id, uri = item.uri, label = item.label,
-            packageName = (item.package_name === nothing ? missing : item.package_name),
-            packageUri = (item.package_uri === nothing ? missing : item.package_uri),
-            projectUri = (item.project_uri === nothing ? missing : item.project_uri),
-            envContentHash = (item.env_content_hash === nothing ? missing : item.env_content_hash),
+            packageName = (discovered.package_name === nothing ? missing : discovered.package_name),
+            packageUri = (discovered.package_uri === nothing ? missing : discovered.package_uri),
+            projectUri = (discovered.project_uri === nothing ? missing : discovered.project_uri),
+            envContentHash = (discovered.env_content_hash === nothing ? missing : discovered.env_content_hash),
             useDefaultUsings = item.option_default_imports, testSetups = item.test_setups,
             line = item.line, column = item.column, code = item.code,
             codeLine = item.code_line, codeColumn = item.code_column,
-            timeout = (item.timeout === nothing ? missing : item.timeout),
+            timeout = missing,
         ) for item in slow_items],
         testSetups = [TestItemControllerProtocol.TestSetupDetail(
             packageUri = s.package_uri, name = s.name, kind = s.kind,

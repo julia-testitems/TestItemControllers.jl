@@ -14,7 +14,7 @@
         coverage_root = filepath2uri(joinpath(pkg_path, "src"))
 
         result = TestHelpers.run_testrun(
-            passing_items, discovered.setups;
+            passing_items, discovered.setups, discovered;
             mode="Coverage",
             coverage_root_uris=[coverage_root],
             timeout=600
@@ -63,7 +63,7 @@ end
         coverage_root = filepath2uri(joinpath(pkg_path, "src"))
 
         result = TestHelpers.run_testrun(
-            items, discovered.setups;
+            items, discovered.setups, discovered;
             mode="Coverage",
             coverage_root_uris=[coverage_root],
             timeout=600
@@ -109,7 +109,7 @@ end
         coverage_root = filepath2uri(joinpath(pkg_path, "src"))
 
         result = TestHelpers.run_testrun(
-            failing_items, discovered.setups;
+            failing_items, discovered.setups, discovered;
             mode="Coverage",
             coverage_root_uris=[coverage_root],
             timeout=600
@@ -142,7 +142,7 @@ end
         fake_root = filepath2uri(joinpath(pkg_path, "src", "nonexistent"))
 
         result = TestHelpers.run_testrun(
-            passing_items, discovered.setups;
+            passing_items, discovered.setups, discovered;
             mode="Coverage",
             coverage_root_uris=[fake_root],
             timeout=600

@@ -8,7 +8,7 @@
     # precompiled_envs no PrecompileDoneMsg was ever emitted, so the new
     # processes waited forever.
 
-    using TestItemControllers: TestItemController, execute_testrun, shutdown,
+    using TestItemControllers: TestItemController, TestRunItem, execute_testrun, shutdown,
         CancellationTokens, ControllerCallbacks
     import UUIDs
 
@@ -26,20 +26,20 @@
     events_lock = ReentrantLock()
 
     callbacks = ControllerCallbacks(
-        on_testitem_started = (run_id, item_id) -> nothing,
-        on_testitem_passed = (run_id, item_id, duration) -> lock(events_lock) do
+        on_testitem_started = (run_id, item_id, test_env_id) -> nothing,
+        on_testitem_passed = (run_id, item_id, test_env_id, duration) -> lock(events_lock) do
             push!(events, (event=:passed, run_id=run_id, item_id=item_id))
         end,
-        on_testitem_failed = (run_id, item_id, messages, duration) -> lock(events_lock) do
+        on_testitem_failed = (run_id, item_id, test_env_id, messages, duration) -> lock(events_lock) do
             push!(events, (event=:failed, run_id=run_id, item_id=item_id))
         end,
-        on_testitem_errored = (run_id, item_id, messages, duration) -> lock(events_lock) do
+        on_testitem_errored = (run_id, item_id, test_env_id, messages, duration) -> lock(events_lock) do
             push!(events, (event=:errored, run_id=run_id, item_id=item_id))
         end,
-        on_testitem_skipped = (run_id, item_id) -> nothing,
-        on_append_output = (run_id, item_id, output) -> nothing,
+        on_testitem_skipped = (run_id, item_id, test_env_id) -> nothing,
+        on_append_output = (run_id, item_id, test_env_id, output) -> nothing,
         on_attach_debugger = (run_id, pipe_name) -> nothing,
-        on_process_created = (id, pkg_name, pkg_uri, proj_uri, coverage, env) -> lock(pc_lock) do
+        on_process_created = (id, test_env_id) -> lock(pc_lock) do
             push!(process_created_ids, id)
         end,
     )
@@ -54,14 +54,17 @@
 
     # -- Run 1: single item, single process (triggers precompilation) ---------
     run1_id = string(UUIDs.uuid4())
-    profile1 = TestHelpers.make_test_profile(; max_procs=1)
+    test_env = TestHelpers.make_test_environment(; TestHelpers._env_kwargs(discovered)...)
 
+    work_units1 = [TestRunItem(item.id, test_env.id, nothing, :Debug) for item in passing_items[1:1]]
     execute_testrun(
         controller,
         run1_id,
-        [profile1],
+        [test_env],
         passing_items[1:1],   # only one item
+        work_units1,
         discovered.setups,
+        1,
         nothing
     )
 
@@ -76,17 +79,19 @@
     # -- Run 2: two items, two processes (must NOT hang) ----------------------
     # Use a cancellation token so we can abort if the bug causes a hang.
     run2_id = string(UUIDs.uuid4())
-    profile2 = TestHelpers.make_test_profile(; max_procs=2)
     run2_cs = CancellationTokens.CancellationTokenSource()
     run2_token = CancellationTokens.get_token(run2_cs)
 
     run2_task = @async try
+        work_units2 = [TestRunItem(item.id, test_env.id, nothing, :Debug) for item in passing_items]
         execute_testrun(
             controller,
             run2_id,
-            [profile2],
+            [test_env],
             passing_items,         # two items → needs two processes
+            work_units2,
             discovered.setups,
+            2,
             run2_token
         )
     catch err

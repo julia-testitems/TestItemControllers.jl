@@ -38,7 +38,7 @@ JSONRPC.@message_dispatcher dispatch_testprocess_msg begin
     end
 end
 
-function start(testprocess_id, reactor_channel, ps::TestProcessState, env::TestEnvironment, debug_pipe_name, error_handler_file, crash_reporting_pipename, token)
+function start(testprocess_id, reactor_channel, ps::TestProcessState, env::ProcessEnv, debug_pipe_name, error_handler_file, crash_reporting_pipename, token)
     pipe_name = JSONRPC.generate_pipe_name()
     server = Sockets.listen(pipe_name)
 

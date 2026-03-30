@@ -6,16 +6,23 @@ function makechunks(X::AbstractVector, n::Integer)
     return [X[1+c*k:(k == n-1 ? end : c*k+c)] for k = 0:n-1]
 end
 
-struct TestProfile
+struct TestEnvironment
     id::String
-    label::String
     julia_cmd::String
     julia_args::Vector{String}
     julia_num_threads::Union{Missing,String}
     julia_env::Dict{String,Union{String,Nothing}}
-    max_process_count::Int
-    mode::String
-    coverage_root_uris::Union{Nothing,Vector{String}}
+    mode::String   # "Normal", "Coverage", or "Debug"
+    package_name::String
+    package_uri::String
+    project_uri::Union{Nothing,String}
+    env_content_hash::Union{Nothing,String}
+end
+
+struct TestRunItem
+    testitem_id::String
+    test_env_id::String
+    timeout::Union{Nothing,Float64}
     log_level::Symbol
 end
 
@@ -23,10 +30,6 @@ struct TestItemDetail
     id::String
     uri::String
     label::String
-    package_name::Union{Nothing,String}
-    package_uri::Union{Nothing,String}
-    project_uri::Union{Nothing,String}
-    env_content_hash::Union{Nothing,String}
     option_default_imports::Bool
     test_setups::Vector{String}
     line::Int
@@ -34,7 +37,6 @@ struct TestItemDetail
     code::String
     code_line::Int
     code_column::Int
-    timeout::Union{Nothing,Float64}
 end
 
 struct TestSetupDetail

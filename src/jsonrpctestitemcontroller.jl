@@ -1,5 +1,6 @@
 mutable struct JSONRPCTestItemController
     endpoint::JSONRPC.JSONRPCEndpoint
+    test_env_by_id::Dict{String,TestEnvironment}
     controller::TestItemController
 
     function JSONRPCTestItemController(
@@ -10,7 +11,7 @@ mutable struct JSONRPCTestItemController
 
         endpoint = JSONRPC.JSONRPCEndpoint(pipe_in, pipe_out)
 
-        jr = new(endpoint)
+        jr = new(endpoint, Dict{String,TestEnvironment}())
 
         # Helper: send a JSONRPC notification, swallowing transport/endpoint errors.
         # These callbacks run on the reactor thread; if the endpoint has closed
@@ -30,14 +31,14 @@ mutable struct JSONRPCTestItemController
         end
 
         callbacks = ControllerCallbacks(
-            on_testitem_started = (testrun_id, testitem_id) -> _safe_send(
+            on_testitem_started = (testrun_id, testitem_id, test_env_id) -> _safe_send(
                 TestItemControllerProtocol.notficiationTypeTestItemStarted,
                 TestItemControllerProtocol.TestItemStartedParams(
                     testRunId=testrun_id,
                     testItemId=testitem_id
                 )
             ),
-            on_testitem_passed = (testrun_id, testitem_id, duration) -> _safe_send(
+            on_testitem_passed = (testrun_id, testitem_id, test_env_id, duration) -> _safe_send(
                 TestItemControllerProtocol.notficiationTypeTestItemPassed,
                 TestItemControllerProtocol.TestItemPassedParams(
                     testRunId=testrun_id,
@@ -45,7 +46,7 @@ mutable struct JSONRPCTestItemController
                     duration=duration
                 )
             ),
-            on_testitem_failed = (testrun_id, testitem_id, messages, duration) -> _safe_send(
+            on_testitem_failed = (testrun_id, testitem_id, test_env_id, messages, duration) -> _safe_send(
                 TestItemControllerProtocol.notficiationTypeTestItemFailed,
                 TestItemControllerProtocol.TestItemFailedParams(
                     testRunId=testrun_id,
@@ -54,7 +55,7 @@ mutable struct JSONRPCTestItemController
                     duration=duration
                 )
             ),
-            on_testitem_errored = (testrun_id, testitem_id, messages, duration) -> _safe_send(
+            on_testitem_errored = (testrun_id, testitem_id, test_env_id, messages, duration) -> _safe_send(
                 TestItemControllerProtocol.notficiationTypeTestItemErrored,
                 TestItemControllerProtocol.TestItemErroredParams(
                     testRunId=testrun_id,
@@ -63,11 +64,11 @@ mutable struct JSONRPCTestItemController
                     duration=duration
                 )
             ),
-            on_testitem_skipped = (testrun_id, testitem_id) -> _safe_send(
+            on_testitem_skipped = (testrun_id, testitem_id, test_env_id) -> _safe_send(
                 TestItemControllerProtocol.notficiationTypeTestItemSkipped,
                 (testRunId=testrun_id, testItemId=testitem_id)
             ),
-            on_append_output = (testrun_id, testitem_id, output) -> _safe_send(
+            on_append_output = (testrun_id, testitem_id, test_env_id, output) -> _safe_send(
                 TestItemControllerProtocol.notficiationTypeAppendOutput,
                 TestItemControllerProtocol.AppendOutputParams(
                     testRunId=testrun_id,
@@ -82,17 +83,22 @@ mutable struct JSONRPCTestItemController
                     testRunId = testrun_id
                 )
             ),
-            on_process_created = (id, package_name, package_uri, project_uri, coverage, env) -> _safe_send(
-                TestItemControllerProtocol.notificationTypeTestProcessCreated,
-                TestItemControllerProtocol.TestProcessCreatedParams(
-                    id = id,
-                    packageName = package_name,
-                    packageUri = something(package_uri, missing),
-                    projectUri = something(project_uri, missing),
-                    coverage = coverage,
-                    env = env
-                )
-            ),
+            on_process_created = (id, test_env_id) -> begin
+                env = get(jr.test_env_by_id, test_env_id, nothing)
+                if env !== nothing
+                    _safe_send(
+                        TestItemControllerProtocol.notificationTypeTestProcessCreated,
+                        TestItemControllerProtocol.TestProcessCreatedParams(
+                            id = id,
+                            packageName = env.package_name,
+                            packageUri = env.package_uri,
+                            projectUri = something(env.project_uri, missing),
+                            coverage = env.mode == "Coverage",
+                            env = env.julia_env
+                        )
+                    )
+                end
+            end,
             on_process_terminated = id -> _safe_send(
                 TestItemControllerProtocol.notificationTypeTestProcessTerminated,
                 (;id = id)
@@ -115,43 +121,72 @@ end
 
 function create_testrun_request(params::TestItemControllerProtocol.CreateTestRunParams, jr_controller::JSONRPCTestItemController, token)
     @debug "Received create_testrun request" testrun_id=params.testRunId profile_count=length(params.testProfiles) testitem_count=length(params.testItems) testsetup_count=length(params.testSetups)
-    ret =  execute_testrun(
+
+    # Convert wire-format TestProfiles into internal TestEnvironment + per-item TestRunItem
+    profile = params.testProfiles[1]
+
+    # Group items by package identity and create one TestEnvironment per unique package
+    PackageKey = Tuple{String,String,Union{Nothing,String},Union{Nothing,String}}
+    envs_by_key = Dict{PackageKey,TestEnvironment}()
+    item_env_id = Dict{String,String}()
+
+    for i in params.testItems
+        key::PackageKey = (
+            coalesce(i.packageName, ""),
+            coalesce(i.packageUri, ""),
+            coalesce(i.projectUri, nothing),
+            coalesce(i.envContentHash, nothing),
+        )
+        if !haskey(envs_by_key, key)
+            env = TestEnvironment(
+                string(UUIDs.uuid4()),
+                profile.juliaCmd,
+                profile.juliaArgs,
+                profile.juliaNumThreads,
+                profile.juliaEnv,
+                profile.mode,
+                key[1], key[2], key[3], key[4],
+            )
+            envs_by_key[key] = env
+            jr_controller.test_env_by_id[env.id] = env
+        end
+        item_env_id[i.id] = envs_by_key[key].id
+    end
+
+    test_environments = collect(values(envs_by_key))
+
+    items = [
+        TestItemDetail(
+            i.id,
+            i.uri,
+            i.label,
+            i.useDefaultUsings,
+            i.testSetups,
+            i.line,
+            i.column,
+            i.code,
+            i.codeLine,
+            i.codeColumn,
+        )
+        for i in params.testItems
+    ]
+
+    work_units = [
+        TestRunItem(
+            i.id,
+            item_env_id[i.id],
+            coalesce(i.timeout, nothing),
+            jr_controller.controller.log_level
+        )
+        for i in params.testItems
+    ]
+
+    ret = execute_testrun(
         jr_controller.controller,
         params.testRunId,
-        [
-            TestProfile(
-                i.id,
-                i.label,
-                i.juliaCmd,
-                i.juliaArgs,
-                i.juliaNumThreads,
-                i.juliaEnv,
-                i.maxProcessCount,
-                i.mode,
-                coalesce(i.coverageRootUris,nothing),
-                jr_controller.controller.log_level
-            ) for i in params.testProfiles
-        ],
-        [
-            TestItemDetail(
-                i.id,
-                i.uri,
-                i.label,
-                coalesce(i.packageName, nothing),
-                coalesce(i.packageUri, nothing),
-                coalesce(i.projectUri, nothing),
-                coalesce(i.envContentHash, nothing),
-                i.useDefaultUsings,
-                i.testSetups,
-                i.line,
-                i.column,
-                i.code,
-                i.codeLine,
-                i.codeColumn,
-                coalesce(i.timeout, nothing)
-            )
-            for i in params.testItems
-        ],
+        test_environments,
+        items,
+        work_units,
         [
             TestSetupDetail(
                 i.packageUri,
@@ -163,7 +198,9 @@ function create_testrun_request(params::TestItemControllerProtocol.CreateTestRun
                 i.code
             ) for i in params.testSetups
         ],
-        token
+        profile.maxProcessCount,
+        token;
+        coverage_root_uris = coalesce(profile.coverageRootUris, nothing)
     )
 
     @debug "Finished create_testrun request" testrun_id=params.testRunId coverage_files=ismissing(ret) ? missing : length(ret)

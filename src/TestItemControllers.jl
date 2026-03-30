@@ -25,8 +25,8 @@ include("json_protocol.jl")
 include("../shared/testserver_protocol.jl")
 include("../shared/urihelper.jl")
 
-include("testenvironment.jl")
 include("datatypes.jl")
+include("testenvironment.jl")
 
 include("fsm.jl")
 include("messages.jl")
