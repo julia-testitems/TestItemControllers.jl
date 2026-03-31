@@ -155,48 +155,36 @@ mutable struct JSONRPCTestItemController
 end
 
 function create_testrun_request(params::TestItemControllerProtocol.CreateTestRunParams, jr_controller::JSONRPCTestItemController, token)
-    @debug "Received create_testrun request" testrun_id=params.testRunId profile_count=length(params.testProfiles) testitem_count=length(params.testItems) testsetup_count=length(params.testSetups)
+    @debug "Received create_testrun request" testrun_id=params.testRunId env_count=length(params.testEnvironments) testitem_count=length(params.testItems) workunit_count=length(params.workUnits) testsetup_count=length(params.testSetups)
 
-    # Convert wire-format TestProfiles into internal TestEnvironment + per-item TestRunItem
-    profile = params.testProfiles[1]
-
-    # Group items by package identity and create one TestEnvironment per unique package
-    PackageKey = Tuple{String,String,Union{Nothing,String},Union{Nothing,String}}
-    envs_by_key = Dict{PackageKey,TestEnvironment}()
-    item_env_id = Dict{String,String}()
-
-    for i in params.testItems
-        key::PackageKey = (
-            coalesce(i.packageName, ""),
-            coalesce(i.packageUri, ""),
-            coalesce(i.projectUri, nothing),
-            coalesce(i.envContentHash, nothing),
+    # Convert wire-format types to internal types
+    test_environments = [
+        TestEnvironment(
+            e.id,
+            e.juliaCmd,
+            e.juliaArgs,
+            coalesce(e.juliaNumThreads, nothing),
+            e.juliaEnv,
+            e.mode,
+            e.packageName,
+            e.packageUri,
+            coalesce(e.projectUri, nothing),
+            coalesce(e.envContentHash, nothing),
         )
-        if !haskey(envs_by_key, key)
-            env = TestEnvironment(
-                string(UUIDs.uuid4()),
-                profile.juliaCmd,
-                profile.juliaArgs,
-                coalesce(profile.juliaNumThreads, nothing),
-                profile.juliaEnv,
-                profile.mode,
-                key[1], key[2], key[3], key[4],
-            )
-            envs_by_key[key] = env
-            jr_controller.test_env_by_id[env.id] = env
-        end
-        item_env_id[i.id] = envs_by_key[key].id
-    end
+        for e in params.testEnvironments
+    ]
 
-    test_environments = collect(values(envs_by_key))
+    for env in test_environments
+        jr_controller.test_env_by_id[env.id] = env
+    end
 
     items = [
         TestItemDetail(
             i.id,
             i.uri,
             i.label,
-            coalesce(i.packageName, ""),
-            coalesce(i.packageUri, ""),
+            i.packageName,
+            i.packageUri,
             i.useDefaultUsings,
             i.testSetups,
             i.line,
@@ -210,12 +198,12 @@ function create_testrun_request(params::TestItemControllerProtocol.CreateTestRun
 
     work_units = [
         TestRunItem(
-            i.id,
-            item_env_id[i.id],
-            coalesce(i.timeout, nothing),
-            jr_controller.controller.log_level
+            w.testitemId,
+            w.testEnvId,
+            coalesce(w.timeout, nothing),
+            Symbol(w.logLevel),
         )
-        for i in params.testItems
+        for w in params.workUnits
     ]
 
     ret = execute_testrun(
@@ -235,9 +223,9 @@ function create_testrun_request(params::TestItemControllerProtocol.CreateTestRun
                 i.code
             ) for i in params.testSetups
         ],
-        profile.maxProcessCount,
+        params.maxProcessCount,
         token;
-        coverage_root_uris = coalesce(profile.coverageRootUris, nothing)
+        coverage_root_uris = coalesce(params.coverageRootUris, nothing)
     )
 
     @debug "Finished create_testrun request" testrun_id=params.testRunId coverage_files=ret === nothing ? 0 : length(ret)
