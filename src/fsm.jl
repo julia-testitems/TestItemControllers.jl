@@ -116,6 +116,13 @@ function testprocess_fsm(id::String)
         end
     end
 
+    # Allow return to idle (→ ProcessIdle) from intermediate setup states
+    # so that cancellation can cleanly return processes to the pool.
+    for phase in (ProcessReviseOrStart, ProcessRevising, ProcessWaitingForPrecompile,
+                  ProcessActivatingEnv, ProcessConfiguringTestRun, ProcessReadyToRun)
+        push!(transitions[phase], ProcessIdle)
+    end
+
     return FSM(ProcessCreated, transitions, id)
 end
 

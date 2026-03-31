@@ -359,3 +359,46 @@ end
         @test occursin("test reason", e.msg)
     end
 end
+
+@testitem "testprocess_fsm ProcessIdle from intermediate states (cancellation)" begin
+    using TestItemControllers: testprocess_fsm, state, transition!,
+        ProcessCreated, ProcessIdle, ProcessReviseOrStart, ProcessRevising,
+        ProcessStarting, ProcessWaitingForPrecompile, ProcessActivatingEnv,
+        ProcessConfiguringTestRun, ProcessReadyToRun, ProcessRunning
+
+    # When a test run is cancelled, processes in any intermediate setup state
+    # must be able to transition back to ProcessIdle (returned to pool).
+    intermediate_states = [ProcessReviseOrStart, ProcessRevising,
+                           ProcessWaitingForPrecompile, ProcessActivatingEnv,
+                           ProcessConfiguringTestRun, ProcessReadyToRun]
+
+    for phase in intermediate_states
+        fsm = testprocess_fsm("proc-idle-cancel-test")
+        # Navigate to the target state
+        if phase == ProcessReviseOrStart
+            transition!(fsm, ProcessReviseOrStart)
+        elseif phase == ProcessRevising
+            transition!(fsm, ProcessReviseOrStart)
+            transition!(fsm, ProcessRevising)
+        elseif phase == ProcessWaitingForPrecompile
+            transition!(fsm, ProcessStarting)
+            transition!(fsm, ProcessWaitingForPrecompile)
+        elseif phase == ProcessActivatingEnv
+            transition!(fsm, ProcessStarting)
+            transition!(fsm, ProcessActivatingEnv)
+        elseif phase == ProcessConfiguringTestRun
+            transition!(fsm, ProcessStarting)
+            transition!(fsm, ProcessActivatingEnv)
+            transition!(fsm, ProcessConfiguringTestRun)
+        elseif phase == ProcessReadyToRun
+            transition!(fsm, ProcessStarting)
+            transition!(fsm, ProcessActivatingEnv)
+            transition!(fsm, ProcessConfiguringTestRun)
+            transition!(fsm, ProcessReadyToRun)
+        end
+
+        @test state(fsm) == phase
+        transition!(fsm, ProcessIdle; reason="returned to pool")
+        @test state(fsm) == ProcessIdle
+    end
+end

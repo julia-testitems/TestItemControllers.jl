@@ -1639,6 +1639,10 @@ function _send_steal!(c::TestItemController, ps::TestProcessState, testitem_ids:
         return
     end
     @async try
+        if ps.endpoint === nothing
+            @debug "Steal cancelled: endpoint gone before send" testprocess_id=ps.id
+            return
+        end
         JSONRPC.send(
             ps.endpoint,
             TestItemServerProtocol.testserver_steal_testitems_request_type,
@@ -1647,7 +1651,11 @@ function _send_steal!(c::TestItemController, ps::TestProcessState, testitem_ids:
             )
         )
     catch err
-        @error "Error stealing testitems" testprocess_id=ps.id exception=(err, catch_backtrace())
+        if err isa JSONRPC.TransportError
+            @debug "Steal failed (transport error, likely cancelled)" testprocess_id=ps.id exception=(err, catch_backtrace())
+        else
+            @error "Error stealing testitems" testprocess_id=ps.id exception=(err, catch_backtrace())
+        end
     end
 end
 
@@ -1707,6 +1715,10 @@ function _get_unchunked_items(tr::TestRunState, env::ProcessEnv)
 end
 
 function _check_stealing!(c::TestItemController, tr::TestRunState, finished_proc_id::String)
+    if state(tr.fsm) in (TestRunCancelled, TestRunCompleted)
+        return
+    end
+
     if !haskey(tr.testitem_ids_by_proc, finished_proc_id)
         return
     end
