@@ -10,7 +10,7 @@ struct TestEnvironment
     id::String
     julia_cmd::String
     julia_args::Vector{String}
-    julia_num_threads::Union{Missing,String}
+    julia_num_threads::Union{Nothing,String}
     julia_env::Dict{String,Union{String,Nothing}}
     mode::String   # "Normal", "Coverage", or "Debug"
     package_name::String
@@ -30,6 +30,8 @@ struct TestItemDetail
     id::String
     uri::String
     label::String
+    package_name::String
+    package_uri::String
     option_default_imports::Bool
     test_setups::Vector{String}
     line::Int
@@ -47,4 +49,26 @@ struct TestSetupDetail
     line::Int
     column::Int
     code::String
+end
+
+struct TestMessageStackFrame
+    label::String
+    uri::Union{Nothing,String}
+    line::Union{Nothing,Int}
+    column::Union{Nothing,Int}
+end
+
+struct TestMessage
+    message::String
+    expected_output::Union{Nothing,String}
+    actual_output::Union{Nothing,String}
+    uri::Union{Nothing,String}
+    line::Union{Nothing,Int}
+    column::Union{Nothing,Int}
+    stack_trace::Union{Nothing,Vector{TestMessageStackFrame}}
+end
+
+struct FileCoverage
+    uri::String
+    coverage::Vector{Union{Int,Nothing}}
 end

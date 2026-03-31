@@ -106,7 +106,7 @@ function handle!(c::TestItemController, ::ShutdownMsg)
                 c.callbacks.on_testitem_skipped(trid, testitem_id, test_env_id)
             end
             transition!(tr.fsm, TestRunCancelled; reason="shutdown")
-            try put!(tr.completion_channel, missing) catch end
+            try put!(tr.completion_channel, nothing) catch end
         end
     end
 
@@ -485,7 +485,7 @@ function handle!(c::TestItemController, msg::TestRunCancelledMsg)
     end
 
     # Signal completion
-    try put!(tr.completion_channel, missing) catch end
+    try put!(tr.completion_channel, nothing) catch end
     return false
 end
 
@@ -643,7 +643,7 @@ function handle!(c::TestItemController, msg::TestItemPassedMsg)
 
         c.callbacks.on_testitem_passed(msg.testrun_id, msg.testitem_id, test_env_id, msg.duration)
 
-        if msg.coverage !== nothing && msg.coverage !== missing
+        if msg.coverage !== nothing
             append!(tr.coverage, map(i -> CoverageTools.FileCoverage(uri2filepath(i.uri), "", i.coverage), msg.coverage))
         end
     else
@@ -656,13 +656,13 @@ function handle!(c::TestItemController, msg::TestItemPassedMsg)
 end
 
 function _convert_stack_trace(server_stack::Union{Missing,Vector{TestItemServerProtocol.TestMessageStackFrame}})
-    server_stack === missing && return missing
-    return TestItemControllerProtocol.TestMessageStackFrame[
-        TestItemControllerProtocol.TestMessageStackFrame(
-            label = frame.label,
-            uri = frame.uri,
-            line = frame.location !== missing ? frame.location.position.line : missing,
-            column = frame.location !== missing ? frame.location.position.character : missing,
+    server_stack === missing && return nothing
+    return TestMessageStackFrame[
+        TestMessageStackFrame(
+            frame.label,
+            frame.uri === missing ? nothing : frame.uri,
+            frame.location !== missing ? frame.location.position.line : nothing,
+            frame.location !== missing ? frame.location.position.character : nothing,
         ) for frame in server_stack
     ]
 end
@@ -701,15 +701,15 @@ function handle!(c::TestItemController, msg::TestItemFailedMsg)
             msg.testrun_id,
             msg.testitem_id,
             test_env_id,
-            TestItemControllerProtocol.TestMessage[
-                TestItemControllerProtocol.TestMessage(
-                    message = i.message,
-                    expectedOutput = i.expectedOutput,
-                    actualOutput = i.actualOutput,
-                    uri = i.location.uri,
-                    line = i.location.position.line,
-                    column = i.location.position.character,
-                    stackTrace = _convert_stack_trace(i.stackTrace),
+            TestMessage[
+                TestMessage(
+                    i.message,
+                    coalesce(i.expectedOutput, nothing),
+                    coalesce(i.actualOutput, nothing),
+                    i.location.uri,
+                    i.location.position.line,
+                    i.location.position.character,
+                    _convert_stack_trace(i.stackTrace),
                 ) for i in msg.messages
             ],
             msg.duration
@@ -757,15 +757,15 @@ function handle!(c::TestItemController, msg::TestItemErroredMsg)
             msg.testrun_id,
             msg.testitem_id,
             test_env_id,
-            TestItemControllerProtocol.TestMessage[
-                TestItemControllerProtocol.TestMessage(
-                    message = i.message,
-                    expectedOutput = missing,
-                    actualOutput = missing,
-                    uri = i.location.uri,
-                    line = i.location.position.line,
-                    column = i.location.position.character,
-                    stackTrace = _convert_stack_trace(i.stackTrace),
+            TestMessage[
+                TestMessage(
+                    i.message,
+                    nothing,
+                    nothing,
+                    i.location.uri,
+                    i.location.position.line,
+                    i.location.position.character,
+                    _convert_stack_trace(i.stackTrace),
                 ) for i in msg.messages
             ],
             msg.duration
@@ -887,17 +887,18 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
                     msg.testrun_id,
                     testitem_id,
                     test_env_id,
-                    TestItemControllerProtocol.TestMessage[
-                        TestItemControllerProtocol.TestMessage(
-                            message = "Test process terminated by user for test item '$(item.label)'",
-                            expectedOutput = missing,
-                            actualOutput = missing,
-                            uri = item.uri,
-                            line = item.line,
-                            column = item.column
+                    TestMessage[
+                        TestMessage(
+                            "Test process terminated by user for test item '$(item.label)'",
+                            nothing,
+                            nothing,
+                            item.uri,
+                            item.line,
+                            item.column,
+                            nothing
                         )
                     ],
-                    missing
+                    nothing
                 )
             end
         end
@@ -938,17 +939,18 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
             msg.testrun_id,
             crashed_item_id,
             test_env_id,
-            TestItemControllerProtocol.TestMessage[
-                TestItemControllerProtocol.TestMessage(
-                    message = "Test process crashed while running test item '$(item.label)'",
-                    expectedOutput = missing,
-                    actualOutput = missing,
-                    uri = item.uri,
-                    line = item.line,
-                    column = item.column
+            TestMessage[
+                TestMessage(
+                    "Test process crashed while running test item '$(item.label)'",
+                    nothing,
+                    nothing,
+                    item.uri,
+                    item.line,
+                    item.column,
+                    nothing
                 )
             ],
-            missing
+            nothing
         )
     elseif crashed_item_id === nothing
         # No item was actively running when the process died.
@@ -967,17 +969,18 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
                         msg.testrun_id,
                         testitem_id,
                         test_env_id,
-                        TestItemControllerProtocol.TestMessage[
-                            TestItemControllerProtocol.TestMessage(
-                                message = "Test process crashed before running test item '$(item.label)'",
-                                expectedOutput = missing,
-                                actualOutput = missing,
-                                uri = item.uri,
-                                line = item.line,
-                                column = item.column
+                        TestMessage[
+                            TestMessage(
+                                "Test process crashed before running test item '$(item.label)'",
+                                nothing,
+                                nothing,
+                                item.uri,
+                                item.line,
+                                item.column,
+                                nothing
                             )
                         ],
-                        missing
+                        nothing
                     )
                 end
             end
@@ -996,17 +999,18 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
                         msg.testrun_id,
                         testitem_id,
                         test_env_id,
-                        TestItemControllerProtocol.TestMessage[
-                            TestItemControllerProtocol.TestMessage(
-                                message = "Test process crashed before starting test item '$(item.label)'",
-                                expectedOutput = missing,
-                                actualOutput = missing,
-                                uri = item.uri,
-                                line = item.line,
-                                column = item.column
+                        TestMessage[
+                            TestMessage(
+                                "Test process crashed before starting test item '$(item.label)'",
+                                nothing,
+                                nothing,
+                                item.uri,
+                                item.line,
+                                item.column,
+                                nothing
                             )
                         ],
-                        missing
+                        nothing
                     )
                 end
             end
@@ -1146,17 +1150,18 @@ function handle!(c::TestItemController, msg::TestItemTimeoutMsg)
             msg.testrun_id,
             msg.testitem_id,
             test_env_id,
-            TestItemControllerProtocol.TestMessage[
-                TestItemControllerProtocol.TestMessage(
-                    message = "Test item '$(item_label)' timed out after $(timeout_val) seconds",
-                    expectedOutput = missing,
-                    actualOutput = missing,
-                    uri = item !== nothing ? item.uri : missing,
-                    line = item !== nothing ? item.line : missing,
-                    column = item !== nothing ? item.column : missing
+            TestMessage[
+                TestMessage(
+                    "Test item '$(item_label)' timed out after $(timeout_val) seconds",
+                    nothing,
+                    nothing,
+                    item !== nothing ? item.uri : nothing,
+                    item !== nothing ? item.line : nothing,
+                    item !== nothing ? item.column : nothing,
+                    nothing
                 )
             ],
-            missing
+            nothing
         )
     end
 
@@ -1363,17 +1368,18 @@ function handle!(c::TestItemController, msg::ActivationFailedMsg)
                     testrun_id,
                     testitem_id,
                     test_env_id,
-                    TestItemControllerProtocol.TestMessage[
-                        TestItemControllerProtocol.TestMessage(
-                            message = "Environment activation failed for package '$(env.package_name)': $(msg.error_message)",
-                            expectedOutput = missing,
-                            actualOutput = missing,
-                            uri = item.uri,
-                            line = item.line,
-                            column = item.column
+                    TestMessage[
+                        TestMessage(
+                            "Environment activation failed for package '$(env.package_name)': $(msg.error_message)",
+                            nothing,
+                            nothing,
+                            item.uri,
+                            item.line,
+                            item.column,
+                            nothing
                         )
                     ],
-                    missing
+                    nothing
                 )
             end
         end
@@ -1404,17 +1410,18 @@ function handle!(c::TestItemController, msg::ActivationFailedMsg)
                         testrun_id,
                         testitem_id,
                         test_env_id,
-                        TestItemControllerProtocol.TestMessage[
-                            TestItemControllerProtocol.TestMessage(
-                                message = "Environment activation failed for package '$(ps.env.package_name)': $(msg.error_message)",
-                                expectedOutput = missing,
-                                actualOutput = missing,
-                                uri = item.uri,
-                                line = item.line,
-                                column = item.column
+                        TestMessage[
+                            TestMessage(
+                                "Environment activation failed for package '$(ps.env.package_name)': $(msg.error_message)",
+                                nothing,
+                                nothing,
+                                item.uri,
+                                item.line,
+                                item.column,
+                                nothing
                             )
                         ],
-                        missing
+                        nothing
                     )
                 end
             end
@@ -1608,8 +1615,8 @@ function _send_run_testitems!(c::TestItemController, ps::TestProcessState, items
                         id = i.id,
                         uri = i.uri,
                         name = i.label,
-                        packageName = something(ps.env.package_name, missing),
-                        packageUri = something(ps.env.package_uri, missing),
+                        packageName = i.package_name,
+                        packageUri = i.package_uri,
                         useDefaultUsings = i.option_default_imports,
                         testSetups = i.test_setups,
                         line = i.code_line,
@@ -1797,12 +1804,12 @@ function _check_testrun_complete!(c::TestItemController, tr::TestRunState)
     pending_stolen = sum(length, values(tr.stolen_ids_by_proc); init=0)
 
     if remaining == 0 && pending_stolen == 0
-        coverage_results = missing
+        coverage_results = nothing
         if !isempty(tr.coverage)
             coverage_results = map(CoverageTools.merge_coverage_counts(tr.coverage)) do i
-                TestItemControllerProtocol.FileCoverage(
-                    uri = filepath2uri(i.filename),
-                    coverage = i.coverage
+                FileCoverage(
+                    filepath2uri(i.filename),
+                    i.coverage
                 )
             end
         end
@@ -1871,7 +1878,7 @@ function execute_testrun(
         if testrun_cancel_registration !== nothing
             try close(testrun_cancel_registration) catch end
         end
-        return missing
+        return nothing
     end
 
     # Build environment mapping (ProcessEnv → testitem_ids)

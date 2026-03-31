@@ -119,7 +119,7 @@ end
             label = "Test",
             juliaCmd = test_env.julia_cmd,
             juliaArgs = test_env.julia_args,
-            juliaNumThreads = coalesce(test_env.julia_num_threads, missing),
+            juliaNumThreads = something(test_env.julia_num_threads, missing),
             juliaEnv = test_env.julia_env,
             maxProcessCount = 1,
             mode = test_env.mode,
@@ -240,7 +240,7 @@ end
         testRunId = testrun_id,
         testProfiles = [TestItemControllerProtocol.TestProfile(
             id = test_env.id, label = "Test", juliaCmd = test_env.julia_cmd,
-            juliaArgs = test_env.julia_args, juliaNumThreads = coalesce(test_env.julia_num_threads, missing),
+            juliaArgs = test_env.julia_args, juliaNumThreads = something(test_env.julia_num_threads, missing),
             juliaEnv = test_env.julia_env, maxProcessCount = 1,
             mode = test_env.mode, coverageRootUris = missing,
         )],
@@ -326,7 +326,7 @@ end
         testRunId = testrun_id,
         testProfiles = [TestItemControllerProtocol.TestProfile(
             id = test_env.id, label = "Test", juliaCmd = test_env.julia_cmd,
-            juliaArgs = test_env.julia_args, juliaNumThreads = coalesce(test_env.julia_num_threads, missing),
+            juliaArgs = test_env.julia_args, juliaNumThreads = something(test_env.julia_num_threads, missing),
             juliaEnv = test_env.julia_env, maxProcessCount = 1,
             mode = test_env.mode, coverageRootUris = missing,
         )],
@@ -424,7 +424,7 @@ end
         testRunId = testrun_id,
         testProfiles = [TestItemControllerProtocol.TestProfile(
             id = test_env.id, label = "Test", juliaCmd = test_env.julia_cmd,
-            juliaArgs = test_env.julia_args, juliaNumThreads = coalesce(test_env.julia_num_threads, missing),
+            juliaArgs = test_env.julia_args, juliaNumThreads = something(test_env.julia_num_threads, missing),
             juliaEnv = test_env.julia_env, maxProcessCount = 1,
             mode = test_env.mode, coverageRootUris = missing,
         )],
@@ -505,7 +505,7 @@ end
         testRunId = testrun_id,
         testProfiles = [TestItemControllerProtocol.TestProfile(
             id = test_env.id, label = "Test", juliaCmd = test_env.julia_cmd,
-            juliaArgs = test_env.julia_args, juliaNumThreads = coalesce(test_env.julia_num_threads, missing),
+            juliaArgs = test_env.julia_args, juliaNumThreads = something(test_env.julia_num_threads, missing),
             juliaEnv = test_env.julia_env, maxProcessCount = 1,
             mode = test_env.mode, coverageRootUris = missing,
         )],

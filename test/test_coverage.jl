@@ -24,7 +24,7 @@
         @test length(passed_events) == 1
 
         # Coverage data should be returned
-        @test result.coverage !== missing
+        @test result.coverage !== nothing
         @test result.coverage isa Vector
         @test length(result.coverage) >= 1
 
@@ -72,7 +72,7 @@ end
         passed_events = filter(e -> e.event == :passed, result.events)
         @test length(passed_events) == 2
 
-        @test result.coverage !== missing
+        @test result.coverage !== nothing
         @test length(result.coverage) >= 1
 
         src_file = joinpath(pkg_path, "src", "BasicPackage.jl")
@@ -153,6 +153,6 @@ end
         @test length(passed_events) == 1
 
         # But coverage should be missing since no files matched the root
-        @test result.coverage === missing
+        @test result.coverage === nothing
     end
 end

@@ -7,7 +7,7 @@
         "MyPkg",
         "julia",
         String[],
-        missing,
+        nothing,
         "Run",
         Dict{String,Union{String,Nothing}}()
     )
@@ -17,7 +17,7 @@
         "MyPkg",
         "julia",
         String[],
-        missing,
+        nothing,
         "Run",
         Dict{String,Union{String,Nothing}}()
     )
@@ -35,7 +35,7 @@ end
         "MyPkg",
         "julia",
         String[],
-        missing,
+        nothing,
         "Run",
         Dict{String,Union{String,Nothing}}()
     )
@@ -45,7 +45,7 @@ end
         "MyPkg",
         "julia",
         String[],
-        missing,
+        nothing,
         "Coverage",
         Dict{String,Union{String,Nothing}}()
     )
@@ -55,7 +55,7 @@ end
         "OtherPkg",
         "julia",
         String[],
-        missing,
+        nothing,
         "Run",
         Dict{String,Union{String,Nothing}}()
     )
@@ -68,9 +68,9 @@ end
 @testitem "ProcessEnv hashing" begin
     using TestItemControllers: ProcessEnv
 
-    env1 = ProcessEnv(nothing, "file:///pkg", "Pkg", "julia", String[], missing, "Run", Dict{String,Union{String,Nothing}}())
-    env2 = ProcessEnv(nothing, "file:///pkg", "Pkg", "julia", String[], missing, "Run", Dict{String,Union{String,Nothing}}())
-    env3 = ProcessEnv(nothing, "file:///pkg", "Pkg", "julia", String[], missing, "Coverage", Dict{String,Union{String,Nothing}}())
+    env1 = ProcessEnv(nothing, "file:///pkg", "Pkg", "julia", String[], nothing, "Run", Dict{String,Union{String,Nothing}}())
+    env2 = ProcessEnv(nothing, "file:///pkg", "Pkg", "julia", String[], nothing, "Run", Dict{String,Union{String,Nothing}}())
+    env3 = ProcessEnv(nothing, "file:///pkg", "Pkg", "julia", String[], nothing, "Coverage", Dict{String,Union{String,Nothing}}())
 
     @test hash(env1) == hash(env2)
     @test hash(env1) != hash(env3)
@@ -79,8 +79,8 @@ end
 @testitem "ProcessEnv as Dict key" begin
     using TestItemControllers: ProcessEnv
 
-    env1 = ProcessEnv(nothing, "file:///pkg", "Pkg", "julia", String[], missing, "Run", Dict{String,Union{String,Nothing}}())
-    env2 = ProcessEnv(nothing, "file:///pkg", "Pkg", "julia", String[], missing, "Run", Dict{String,Union{String,Nothing}}())
+    env1 = ProcessEnv(nothing, "file:///pkg", "Pkg", "julia", String[], nothing, "Run", Dict{String,Union{String,Nothing}}())
+    env2 = ProcessEnv(nothing, "file:///pkg", "Pkg", "julia", String[], nothing, "Run", Dict{String,Union{String,Nothing}}())
 
     d = Dict{ProcessEnv,Int}()
     d[env1] = 42
@@ -92,15 +92,15 @@ end
     using TestItemControllers: ProcessEnv
 
     env1 = ProcessEnv(
-        nothing, "file:///pkg", "Pkg", "julia", String[], missing, "Run",
+        nothing, "file:///pkg", "Pkg", "julia", String[], nothing, "Run",
         Dict{String,Union{String,Nothing}}("MY_VAR" => "hello", "OTHER" => nothing)
     )
     env2 = ProcessEnv(
-        nothing, "file:///pkg", "Pkg", "julia", String[], missing, "Run",
+        nothing, "file:///pkg", "Pkg", "julia", String[], nothing, "Run",
         Dict{String,Union{String,Nothing}}("MY_VAR" => "hello", "OTHER" => nothing)
     )
     env3 = ProcessEnv(
-        nothing, "file:///pkg", "Pkg", "julia", String[], missing, "Run",
+        nothing, "file:///pkg", "Pkg", "julia", String[], nothing, "Run",
         Dict{String,Union{String,Nothing}}("MY_VAR" => "different")
     )
 
@@ -119,17 +119,17 @@ end
     env1 = ProcessEnv(
         nothing, "file:///pkg", "Pkg", "julia",
         ["--optimize=2"],
-        missing, "Run", Dict{String,Union{String,Nothing}}()
+        nothing, "Run", Dict{String,Union{String,Nothing}}()
     )
     env2 = ProcessEnv(
         nothing, "file:///pkg", "Pkg", "julia",
         ["--optimize=0"],
-        missing, "Run", Dict{String,Union{String,Nothing}}()
+        nothing, "Run", Dict{String,Union{String,Nothing}}()
     )
     env3 = ProcessEnv(
         nothing, "file:///pkg", "Pkg", "julia",
         ["--optimize=2"],
-        missing, "Run", Dict{String,Union{String,Nothing}}()
+        nothing, "Run", Dict{String,Union{String,Nothing}}()
     )
 
     @test env1 != env2
@@ -144,9 +144,9 @@ end
 @testitem "ProcessEnv with different juliaNumThreads" begin
     using TestItemControllers: ProcessEnv
 
-    env_missing = ProcessEnv(
+    env_nothing = ProcessEnv(
         nothing, "file:///pkg", "Pkg", "julia", String[],
-        missing, "Run", Dict{String,Union{String,Nothing}}()
+        nothing, "Run", Dict{String,Union{String,Nothing}}()
     )
     env_auto = ProcessEnv(
         nothing, "file:///pkg", "Pkg", "julia", String[],
@@ -157,11 +157,10 @@ end
         "4", "Run", Dict{String,Union{String,Nothing}}()
     )
 
-    @test env_missing != env_auto
+    @test env_nothing != env_auto
     @test env_auto != env_four
-    @test !isequal(env_missing, env_auto)
-    # isequal should handle missing correctly
-    @test isequal(env_missing, env_missing)
+    @test !isequal(env_nothing, env_auto)
+    @test isequal(env_nothing, env_nothing)
 end
 
 @testitem "ProcessEnv with different project_uri" begin
@@ -169,15 +168,15 @@ end
 
     env1 = ProcessEnv(
         "file:///project1", "file:///pkg", "Pkg", "julia",
-        String[], missing, "Run", Dict{String,Union{String,Nothing}}()
+        String[], nothing, "Run", Dict{String,Union{String,Nothing}}()
     )
     env2 = ProcessEnv(
         "file:///project2", "file:///pkg", "Pkg", "julia",
-        String[], missing, "Run", Dict{String,Union{String,Nothing}}()
+        String[], nothing, "Run", Dict{String,Union{String,Nothing}}()
     )
     env_nothing = ProcessEnv(
         nothing, "file:///pkg", "Pkg", "julia",
-        String[], missing, "Run", Dict{String,Union{String,Nothing}}()
+        String[], nothing, "Run", Dict{String,Union{String,Nothing}}()
     )
 
     @test env1 != env2

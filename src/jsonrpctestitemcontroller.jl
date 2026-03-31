@@ -1,3 +1,38 @@
+function _to_wire_stack_trace(stack_trace::Union{Nothing,Vector{TestMessageStackFrame}})
+    stack_trace === nothing && return missing
+    return TestItemControllerProtocol.TestMessageStackFrame[
+        TestItemControllerProtocol.TestMessageStackFrame(
+            label = f.label,
+            uri = something(f.uri, missing),
+            line = something(f.line, missing),
+            column = something(f.column, missing),
+        ) for f in stack_trace
+    ]
+end
+
+function _to_wire_messages(messages::Vector{TestMessage})
+    return TestItemControllerProtocol.TestMessage[
+        TestItemControllerProtocol.TestMessage(
+            message = m.message,
+            expectedOutput = something(m.expected_output, missing),
+            actualOutput = something(m.actual_output, missing),
+            uri = something(m.uri, missing),
+            line = something(m.line, missing),
+            column = something(m.column, missing),
+            stackTrace = _to_wire_stack_trace(m.stack_trace),
+        ) for m in messages
+    ]
+end
+
+function _to_wire_coverage(coverage::Vector{FileCoverage})
+    return TestItemControllerProtocol.FileCoverage[
+        TestItemControllerProtocol.FileCoverage(
+            uri = fc.uri,
+            coverage = fc.coverage,
+        ) for fc in coverage
+    ]
+end
+
 mutable struct JSONRPCTestItemController
     endpoint::JSONRPC.JSONRPCEndpoint
     test_env_by_id::Dict{String,TestEnvironment}
@@ -51,8 +86,8 @@ mutable struct JSONRPCTestItemController
                 TestItemControllerProtocol.TestItemFailedParams(
                     testRunId=testrun_id,
                     testItemId=testitem_id,
-                    messages=messages,
-                    duration=duration
+                    messages=_to_wire_messages(messages),
+                    duration=something(duration, missing)
                 )
             ),
             on_testitem_errored = (testrun_id, testitem_id, test_env_id, messages, duration) -> _safe_send(
@@ -60,8 +95,8 @@ mutable struct JSONRPCTestItemController
                 TestItemControllerProtocol.TestItemErroredParams(
                     testRunId=testrun_id,
                     testItemId=testitem_id,
-                    messages=messages,
-                    duration=duration
+                    messages=_to_wire_messages(messages),
+                    duration=something(duration, missing)
                 )
             ),
             on_testitem_skipped = (testrun_id, testitem_id, test_env_id) -> _safe_send(
@@ -142,7 +177,7 @@ function create_testrun_request(params::TestItemControllerProtocol.CreateTestRun
                 string(UUIDs.uuid4()),
                 profile.juliaCmd,
                 profile.juliaArgs,
-                profile.juliaNumThreads,
+                coalesce(profile.juliaNumThreads, nothing),
                 profile.juliaEnv,
                 profile.mode,
                 key[1], key[2], key[3], key[4],
@@ -160,6 +195,8 @@ function create_testrun_request(params::TestItemControllerProtocol.CreateTestRun
             i.id,
             i.uri,
             i.label,
+            coalesce(i.packageName, ""),
+            coalesce(i.packageUri, ""),
             i.useDefaultUsings,
             i.testSetups,
             i.line,
@@ -203,8 +240,8 @@ function create_testrun_request(params::TestItemControllerProtocol.CreateTestRun
         coverage_root_uris = coalesce(profile.coverageRootUris, nothing)
     )
 
-    @debug "Finished create_testrun request" testrun_id=params.testRunId coverage_files=ismissing(ret) ? missing : length(ret)
-    return TestItemControllerProtocol.CreateTestRunResponse("success", ret)
+    @debug "Finished create_testrun request" testrun_id=params.testRunId coverage_files=ret === nothing ? 0 : length(ret)
+    return TestItemControllerProtocol.CreateTestRunResponse("success", ret === nothing ? missing : _to_wire_coverage(ret))
 end
 
 function terminate_test_process_request(params::TestItemControllerProtocol.TerminateTestProcessParams, json_controller::JSONRPCTestItemController, token)

@@ -75,7 +75,7 @@ struct TestItemPassedMsg <: ReactorMessage
     testprocess_id::String
     testitem_id::String
     duration::Float64
-    coverage::Union{Missing,Vector{Any}}  # Missing or Vector{FileCoverage}
+    coverage::Union{Nothing,Vector{Any}}
 end
 
 struct TestItemFailedMsg <: ReactorMessage
@@ -83,7 +83,7 @@ struct TestItemFailedMsg <: ReactorMessage
     testprocess_id::String
     testitem_id::String
     messages::Vector{Any}
-    duration::Union{Float64,Missing}
+    duration::Union{Nothing,Float64}
 end
 
 struct TestItemErroredMsg <: ReactorMessage
@@ -91,7 +91,7 @@ struct TestItemErroredMsg <: ReactorMessage
     testprocess_id::String
     testitem_id::String
     messages::Vector{Any}
-    duration::Union{Float64,Missing}
+    duration::Union{Nothing,Float64}
 end
 
 struct TestItemSkippedStolenMsg <: ReactorMessage

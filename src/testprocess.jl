@@ -12,21 +12,21 @@ JSONRPC.@message_dispatcher dispatch_testprocess_msg begin
         reactor_channel, ps = ctx
         testrun_id = ps.testrun_id
         if testrun_id !== nothing
-            put!(reactor_channel, TestItemPassedMsg(testrun_id, ps.id, params.testItemId, params.duration, params.coverage))
+            put!(reactor_channel, TestItemPassedMsg(testrun_id, ps.id, params.testItemId, params.duration, coalesce(params.coverage, nothing)))
         end
     end
     TestItemServerProtocol.failed_notification_type => (params, ctx) -> begin
         reactor_channel, ps = ctx
         testrun_id = ps.testrun_id
         if testrun_id !== nothing
-            put!(reactor_channel, TestItemFailedMsg(testrun_id, ps.id, params.testItemId, params.messages, params.duration))
+            put!(reactor_channel, TestItemFailedMsg(testrun_id, ps.id, params.testItemId, params.messages, coalesce(params.duration, nothing)))
         end
     end
     TestItemServerProtocol.errored_notification_type => (params, ctx) -> begin
         reactor_channel, ps = ctx
         testrun_id = ps.testrun_id
         if testrun_id !== nothing
-            put!(reactor_channel, TestItemErroredMsg(testrun_id, ps.id, params.testItemId, params.messages, params.duration))
+            put!(reactor_channel, TestItemErroredMsg(testrun_id, ps.id, params.testItemId, params.messages, coalesce(params.duration, nothing)))
         end
     end
     TestItemServerProtocol.skipped_stolen_notification_type => (params, ctx) -> begin
@@ -55,7 +55,7 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
 
     jlArgs = copy(env.juliaArgs)
 
-    if env.juliaNumThreads!==missing && env.juliaNumThreads == "auto"
+    if env.juliaNumThreads!==nothing && env.juliaNumThreads == "auto"
         push!(jlArgs, "--threads=auto")
     end
 
@@ -75,7 +75,7 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
         end
     end
 
-    if env.juliaNumThreads!==missing && env.juliaNumThreads!="auto" && env.juliaNumThreads!=""
+    if env.juliaNumThreads!==nothing && env.juliaNumThreads!="auto" && env.juliaNumThreads!=""
         jlEnv["JULIA_NUM_THREADS"] = env.juliaNumThreads
     end
 

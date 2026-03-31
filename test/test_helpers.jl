@@ -66,6 +66,8 @@
                     ti.id,                                    # id
                     string(ti.uri),                           # uri
                     ti.name,                                  # label
+                    env.package_name === nothing ? "" : env.package_name,  # package_name
+                    env.package_uri === nothing ? "" : string(env.package_uri),  # package_uri
                     ti.option_default_imports,                 # option_default_imports
                     String[string(s) for s in ti.option_setup],  # test_setups
                     pos[1],                                    # line
@@ -102,7 +104,7 @@
             "test-env-1",
             julia_cmd,
             julia_args,
-            missing,
+            nothing,
             Dict{String,Union{String,Nothing}}(),
             mode,
             package_name,
@@ -168,7 +170,7 @@
             @error "Controller run error" exception=(err, catch_backtrace())
         end
 
-        coverage_result = missing
+        coverage_result = nothing
         testrun_task = @async try
             coverage_result = execute_testrun(
                 controller,

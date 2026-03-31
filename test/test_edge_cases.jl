@@ -5,7 +5,7 @@
 
     # Should complete without any events
     @test isempty(result.events)
-    @test ismissing(result.coverage)
+    @test result.coverage === nothing
 end
 
 @testitem "Shutdown during active test run" setup=[TestHelpers] begin

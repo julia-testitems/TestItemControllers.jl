@@ -7,7 +7,7 @@
         "MyPkg",
         "julia",
         String[],
-        missing,
+        nothing,
         "Run",
         Dict{String,Union{String,Nothing}}()
     )
@@ -48,7 +48,7 @@ end
         "MyPkg",
         "julia",
         String[],
-        missing,
+        nothing,
         "Run",
         Dict{String,Union{String,Nothing}}()
     )
@@ -71,16 +71,16 @@ end
         state, TestRunCreated, CancellationTokens
 
     test_env = TestEnvironment(
-        "env-1", "julia", String[], missing,
+        "env-1", "julia", String[], nothing,
         Dict{String,Union{String,Nothing}}(), "Run",
         "Pkg", "file:///pkg", "file:///proj", nothing
     )
 
     items = [
         TestItemDetail("item-1", "file:///test.jl", "test1",
-            true, String[], 1, 1, "@test true", 1, 1),
+            "Pkg", "file:///pkg", true, String[], 1, 1, "@test true", 1, 1),
         TestItemDetail("item-2", "file:///test.jl", "test2",
-            true, String[], 5, 1, "@test false", 5, 1),
+            "Pkg", "file:///pkg", true, String[], 5, 1, "@test false", 5, 1),
     ]
 
     work_units = [
@@ -115,14 +115,14 @@ end
         CancellationTokens
 
     test_env = TestEnvironment(
-        "env-1", "julia", String[], missing,
+        "env-1", "julia", String[], nothing,
         Dict{String,Union{String,Nothing}}(), "Run",
         "Pkg", "file:///pkg", "file:///proj", nothing
     )
 
     items = [
         TestItemDetail("item-1", "file:///test.jl", "test1",
-            true, String[], 1, 1, "@test true", 1, 1),
+            "Pkg", "file:///pkg", true, String[], 1, 1, "@test true", 1, 1),
     ]
 
     work_units = [TestRunItem("item-1", "env-1", nothing, :Info)]
@@ -143,7 +143,7 @@ end
         CancellationTokens
 
     test_env = TestEnvironment(
-        "env-1", "julia", String[], missing,
+        "env-1", "julia", String[], nothing,
         Dict{String,Union{String,Nothing}}(), "Run",
         "", "", nothing, nothing
     )
