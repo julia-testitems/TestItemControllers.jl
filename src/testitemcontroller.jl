@@ -1,3 +1,30 @@
+"""
+    TestItemController(callbacks; error_handler_file=nothing, crash_reporting_pipename=nothing, log_level=:Info)
+
+Create a test item controller that manages Julia child processes and schedules
+test runs.
+
+After construction, call `run(controller)` (or `@async run(controller)`) to start
+the reactor event loop, then use [`execute_testrun`](@ref) to submit work.
+
+# Arguments
+- `callbacks::ControllerCallbacks` — callback functions invoked on test-item and process lifecycle events.
+
+# Keyword arguments
+- `error_handler_file` — optional path to a Julia file loaded in child processes for custom error handling.
+- `crash_reporting_pipename` — optional named-pipe path for crash diagnostics.
+- `log_level::Symbol` — minimum log level (default `:Info`).
+
+# Lifecycle
+
+1. Construct: `ctrl = TestItemController(callbacks)`
+2. Start reactor: `t = @async run(ctrl)`
+3. Run tests: `coverage = execute_testrun(ctrl, ...)`  (blocks until done)
+4. Shut down: `shutdown(ctrl); wait_for_shutdown(ctrl, t)`
+
+See also [`ControllerCallbacks`](@ref), [`execute_testrun`](@ref), [`shutdown`](@ref),
+[`wait_for_shutdown`](@ref).
+"""
 mutable struct TestItemController{CB<:ControllerCallbacks}
     callbacks::CB
 
@@ -48,6 +75,15 @@ mutable struct TestItemController{CB<:ControllerCallbacks}
     end
 end
 
+"""
+    shutdown(controller::TestItemController)
+
+Request an orderly shutdown of the controller. Active test runs are cancelled,
+all child processes are terminated, and the reactor loop exits.
+
+This function returns immediately. Use [`wait_for_shutdown`](@ref) to block
+until all resources are fully released.
+"""
 function shutdown(controller::TestItemController)
     @info "Queueing controller shutdown"
     put!(controller.reactor_channel, ShutdownMsg())
@@ -70,6 +106,12 @@ function wait_for_shutdown(controller::TestItemController, reactor_task::Task)
     empty!(controller.process_tasks)
 end
 
+"""
+    terminate_test_process(controller::TestItemController, id::String)
+
+Request termination of a single test process by its `id`. The process is killed
+asynchronously; the `on_process_terminated` callback fires when it is gone.
+"""
 function terminate_test_process(controller::TestItemController, id::String)
     @debug "Terminating test process" id
     put!(controller.reactor_channel, TerminateTestProcessMsg(id))
@@ -1837,6 +1879,29 @@ end
 # execute_testrun — thin wrapper, no callbacks in signature
 # ═══════════════════════════════════════════════════════════════════════════════
 
+"""
+    execute_testrun(controller, testrun_id, test_environments, test_items, work_units, test_setups, max_processes, token; coverage_root_uris=nothing) -> Union{Nothing,Vector{FileCoverage}}
+
+Submit a test run and block until it completes (or is cancelled).
+
+The controller acquires processes from its pool (launching new ones as needed),
+assigns work units to them, and reports progress through the callbacks. When all
+work units have finished, the function returns collected coverage data (if the
+environments use `"Coverage"` mode) or `nothing`.
+
+# Arguments
+- `controller::TestItemController` — a running controller (its reactor loop must be active).
+- `testrun_id::String` — unique identifier for this run.
+- `test_environments::Vector{TestEnvironment}` — Julia process configurations.
+- `test_items::Vector{TestItemDetail}` — metadata for every test item referenced by `work_units`.
+- `work_units::Vector{TestRunItem}` — the (test item, environment) pairs to execute.
+- `test_setups::Vector{TestSetupDetail}` — setup/module blocks needed by the test items.
+- `max_processes::Int` — upper bound on the number of concurrent child processes.
+- `token` — a `CancellationToken` (or `nothing`) that can cancel the entire run.
+
+# Keyword arguments
+- `coverage_root_uris` — if set, only collect coverage for files under these URI prefixes.
+"""
 function execute_testrun(
     controller::TestItemController,
     testrun_id::String,
