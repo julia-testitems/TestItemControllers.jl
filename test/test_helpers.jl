@@ -19,7 +19,7 @@
             wait(timer)
             if !istaskdone(task)
                 timed_out[] = true
-                @error "HANG DETECTED: $(label) did not complete within $(timeout_secs)s"
+                @warn "HANG DETECTED: $(label) did not complete within $(timeout_secs)s"
                 # Print stack traces of all tasks to aid debugging
                 try
                     Base.throwto(task, ErrorException("Test timed out: $(label) exceeded $(timeout_secs)s"))

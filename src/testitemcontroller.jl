@@ -1371,7 +1371,7 @@ function handle!(c::TestItemController, msg::ActivationFailedMsg)
         return false
     end
 
-    @error "Environment activation failed for process" testprocess_id=msg.testprocess_id is_precompile=ps.is_precompile_process error=msg.error_message
+    @warn "Environment activation failed for process" testprocess_id=msg.testprocess_id is_precompile=ps.is_precompile_process error=msg.error_message
 
     if ps.testrun_id === nothing || !haskey(c.test_runs, ps.testrun_id)
         # No active test run — just kill process
@@ -1586,7 +1586,6 @@ function _launch_julia_process!(c::TestItemController, ps::TestProcessState)
               c.error_handler_file, c.crash_reporting_pipename,
               launch_token)
     catch err
-        # TODO This sequence doesn't make sense, if `@error` has been called, everything stops
         if !CancellationTokens.is_cancellation_requested(launch_token)
             @error "Error in test process IO" testprocess_id=ps.id exception=(err, catch_backtrace())
         end
@@ -1618,7 +1617,7 @@ function _activate_env!(c::TestItemController, ps::TestProcessState)
         )
 
         if result.status == "failed"
-            @error "Environment activation failed" testprocess_id=ps.id error=coalesce(result.error, "unknown error")
+            @warn "Environment activation failed" testprocess_id=ps.id error=coalesce(result.error, "unknown error")
             put!(c.reactor_channel, ActivationFailedMsg(ps.id, coalesce(result.error, "Environment activation failed")))
             return
         end

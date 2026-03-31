@@ -221,7 +221,7 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
             if CancellationTokens.is_cancellation_requested(token)
                 @debug "Test process exited before connecting (cancellation requested)" testprocess_id exitcode=jl_process.exitcode pipe_name
             else
-                @error "Test process exited before connecting" testprocess_id exitcode=jl_process.exitcode pipe_name captured_output
+                @warn "Test process exited before connecting" testprocess_id exitcode=jl_process.exitcode pipe_name captured_output
             end
             try close(server) catch end
         end
@@ -240,7 +240,7 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
         end
         if !process_running(jl_process)
             captured_output = lock(raw_output_lock) do; join(raw_output_chunks); end
-            @error "Test process startup failure details" testprocess_id exitcode=jl_process.exitcode captured_output
+            @warn "Test process startup failure details" testprocess_id exitcode=jl_process.exitcode captured_output
             error("Test process exited (code $(jl_process.exitcode)) before connecting to named pipe. Output: $(captured_output)")
         end
         @error "Sockets.accept failed unexpectedly" testprocess_id exception=(err, catch_backtrace())
