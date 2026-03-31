@@ -9,8 +9,8 @@ struct ShutdownMsg <: ReactorMessage end
 
 struct GetProcsForTestRunMsg <: ReactorMessage
     testrun_id::String
-    proc_count_by_env::Dict{TestEnvironment,Int}
-    env_content_hash_by_env::Dict{TestEnvironment,Union{Nothing,String}}
+    proc_count_by_env::Dict{ProcessEnv,Int}
+    env_content_hash_by_env::Dict{ProcessEnv,Union{Nothing,String}}
     test_setups::Vector{TestItemServerProtocol.TestsetupDetails}
     coverage_root_uris::Union{Nothing,Vector{String}}
     log_level::Symbol
@@ -18,7 +18,7 @@ end
 
 struct ReturnToPoolMsg <: ReactorMessage
     testprocess_id::String
-    env::TestEnvironment
+    env::ProcessEnv
 end
 
 struct TestProcessTerminatedMsg <: ReactorMessage
@@ -41,7 +41,7 @@ end
 
 struct ProcsAcquiredMsg <: ReactorMessage
     testrun_id::String
-    procs::Dict{TestEnvironment,Vector{String}}  # env → process IDs
+    procs::Dict{ProcessEnv,Vector{String}}  # env → process IDs
 end
 
 struct TestRunCancelledMsg <: ReactorMessage
@@ -55,7 +55,7 @@ end
 
 struct PrecompileDoneMsg <: ReactorMessage
     testrun_id::String
-    env::TestEnvironment
+    env::ProcessEnv
     testprocess_id::String
 end
 
@@ -75,7 +75,7 @@ struct TestItemPassedMsg <: ReactorMessage
     testprocess_id::String
     testitem_id::String
     duration::Float64
-    coverage::Union{Missing,Vector{Any}}  # Missing or Vector{FileCoverage}
+    coverage::Union{Nothing,Vector{Any}}
 end
 
 struct TestItemFailedMsg <: ReactorMessage
@@ -83,7 +83,7 @@ struct TestItemFailedMsg <: ReactorMessage
     testprocess_id::String
     testitem_id::String
     messages::Vector{Any}
-    duration::Union{Float64,Missing}
+    duration::Union{Nothing,Float64}
 end
 
 struct TestItemErroredMsg <: ReactorMessage
@@ -91,7 +91,7 @@ struct TestItemErroredMsg <: ReactorMessage
     testprocess_id::String
     testitem_id::String
     messages::Vector{Any}
-    duration::Union{Float64,Missing}
+    duration::Union{Nothing,Float64}
 end
 
 struct TestItemSkippedStolenMsg <: ReactorMessage

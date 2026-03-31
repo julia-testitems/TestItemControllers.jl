@@ -5,7 +5,7 @@
     erroring_items = filter(i -> i.label == "erroring test", discovered.items)
     @test length(erroring_items) == 1
 
-    result = TestHelpers.run_testrun(erroring_items, discovered.setups)
+    result = TestHelpers.run_testrun(erroring_items, discovered.setups, discovered)
 
     errored_events = filter(e -> e.event == :errored, result.events)
     @test length(errored_events) == 1
@@ -14,11 +14,11 @@
     @test occursin("intentional error", msg.message)
 
     # The error should have a stack trace
-    @test !ismissing(msg.stackTrace)
-    @test length(msg.stackTrace) >= 1
+    @test msg.stack_trace !== nothing
+    @test length(msg.stack_trace) >= 1
 
     # Each frame should have a label
-    for frame in msg.stackTrace
+    for frame in msg.stack_trace
         @test frame.label isa String
         @test !isempty(frame.label)
     end
@@ -31,7 +31,7 @@ end
     items = filter(i -> i.label == "erroring test deep stack", discovered.items)
     @test length(items) == 1
 
-    result = TestHelpers.run_testrun(items, discovered.setups)
+    result = TestHelpers.run_testrun(items, discovered.setups, discovered)
 
     errored_events = filter(e -> e.event == :errored, result.events)
     @test length(errored_events) == 1
@@ -39,11 +39,11 @@ end
     msg = errored_events[1].messages[1]
     @test occursin("deep error", msg.message)
 
-    @test !ismissing(msg.stackTrace)
+    @test msg.stack_trace !== nothing
     # Should have frames for inner, middle, outer at minimum
-    @test length(msg.stackTrace) >= 3
+    @test length(msg.stack_trace) >= 3
 
-    labels = [f.label for f in msg.stackTrace]
+    labels = [f.label for f in msg.stack_trace]
     @test any(l -> occursin("inner", l), labels)
     @test any(l -> occursin("middle", l), labels)
     @test any(l -> occursin("outer", l), labels)
@@ -56,28 +56,28 @@ end
     items = filter(i -> i.label == "erroring test via package", discovered.items)
     @test length(items) == 1
 
-    result = TestHelpers.run_testrun(items, discovered.setups)
+    result = TestHelpers.run_testrun(items, discovered.setups, discovered)
 
     errored_events = filter(e -> e.event == :errored, result.events)
     @test length(errored_events) == 1
 
     msg = errored_events[1].messages[1]
-    @test !ismissing(msg.stackTrace)
+    @test msg.stack_trace !== nothing
 
     # At least one frame should have a uri pointing to a file
-    frames_with_uri = filter(f -> !ismissing(f.uri), msg.stackTrace)
+    frames_with_uri = filter(f -> f.uri !== nothing, msg.stack_trace)
     @test length(frames_with_uri) >= 1
 
     # Frames with a URI should also have line and column info
     for frame in frames_with_uri
-        @test !ismissing(frame.line)
+        @test frame.line !== nothing
         @test frame.line >= 1
-        @test !ismissing(frame.column)
+        @test frame.column !== nothing
         @test frame.column >= 1
     end
 
     # The buggy_func frame should be present
-    labels = [f.label for f in msg.stackTrace]
+    labels = [f.label for f in msg.stack_trace]
     @test any(l -> occursin("buggy_func", l), labels)
 end
 
@@ -89,14 +89,14 @@ end
     failing_items = filter(i -> i.label == "failing test", discovered.items)
     @test length(failing_items) == 1
 
-    result = TestHelpers.run_testrun(failing_items, discovered.setups)
+    result = TestHelpers.run_testrun(failing_items, discovered.setups, discovered)
 
     failed_events = filter(e -> e.event == :failed, result.events)
     @test length(failed_events) == 1
 
-    # Test.Fail objects don't have backtraces, so stackTrace should be missing
+    # Test.Fail objects don't have backtraces, so stack_trace should be nothing
     for msg in failed_events[1].messages
-        @test ismissing(msg.stackTrace)
+        @test msg.stack_trace === nothing
     end
 end
 
@@ -107,7 +107,7 @@ end
     items = filter(i -> i.label == "failing test multiple", discovered.items)
     @test length(items) == 1
 
-    result = TestHelpers.run_testrun(items, discovered.setups)
+    result = TestHelpers.run_testrun(items, discovered.setups, discovered)
 
     failed_events = filter(e -> e.event == :failed, result.events)
     @test length(failed_events) == 1
@@ -118,11 +118,12 @@ end
     using TestItemControllers: TestItemControllers
 
     result = TestItemControllers._convert_stack_trace(missing)
-    @test result === missing
+    @test result === nothing
 end
 
 @testitem "_convert_stack_trace with frames" begin
-    using TestItemControllers: TestItemControllers, TestItemServerProtocol, TestItemControllerProtocol
+    using TestItemControllers: TestItemControllers, TestItemServerProtocol
+    using TestItemControllers: TestMessageStackFrame
 
     server_frames = [
         TestItemServerProtocol.TestMessageStackFrame(
@@ -141,7 +142,7 @@ end
     ]
 
     result = TestItemControllers._convert_stack_trace(server_frames)
-    @test result isa Vector{TestItemControllerProtocol.TestMessageStackFrame}
+    @test result isa Vector{TestMessageStackFrame}
     @test length(result) == 2
 
     @test result[1].label == "my_func"
@@ -150,9 +151,9 @@ end
     @test result[1].column == 3
 
     @test result[2].label == "top-level scope"
-    @test ismissing(result[2].uri)
-    @test ismissing(result[2].line)
-    @test ismissing(result[2].column)
+    @test result[2].uri === nothing
+    @test result[2].line === nothing
+    @test result[2].column === nothing
 end
 
 @testitem "TestMessage with missing stackTrace round-trip" begin
@@ -313,7 +314,7 @@ end
     items = filter(i -> i.label == "test error inside @test", discovered.items)
     @test length(items) == 1
 
-    result = TestHelpers.run_testrun(items, discovered.setups)
+    result = TestHelpers.run_testrun(items, discovered.setups, discovered)
 
     failed_events = filter(e -> e.event == :failed, result.events)
     @test length(failed_events) == 1
@@ -323,8 +324,8 @@ end
     @test occursin("inside test macro", msg.message)
 
     # The message location should point to the @test line (i.source)
-    @test !ismissing(msg.uri)
-    @test !ismissing(msg.line)
+    @test msg.uri !== nothing
+    @test msg.line !== nothing
 end
 
 @testitem "Deep error inside @test has multiple frames" setup=[TestHelpers] begin
@@ -334,7 +335,7 @@ end
     items = filter(i -> i.label == "test error inside @test deep stack", discovered.items)
     @test length(items) == 1
 
-    result = TestHelpers.run_testrun(items, discovered.setups)
+    result = TestHelpers.run_testrun(items, discovered.setups, discovered)
 
     failed_events = filter(e -> e.event == :failed, result.events)
     @test length(failed_events) == 1
@@ -342,15 +343,15 @@ end
     msg = failed_events[1].messages[1]
     @test occursin("deep @test error", msg.message)
 
-    @test !ismissing(msg.stackTrace)
-    @test length(msg.stackTrace) >= 3
+    @test msg.stack_trace !== nothing
+    @test length(msg.stack_trace) >= 3
 
-    labels = [f.label for f in msg.stackTrace]
+    labels = [f.label for f in msg.stack_trace]
     @test any(l -> occursin("inner_test_func", l), labels)
     @test any(l -> occursin("middle_test_func", l), labels)
     @test any(l -> occursin("outer_test_func", l), labels)
 
     # At least some frames should have file URIs
-    frames_with_uri = filter(f -> !ismissing(f.uri), msg.stackTrace)
+    frames_with_uri = filter(f -> f.uri !== nothing, msg.stack_trace)
     @test length(frames_with_uri) >= 1
 end

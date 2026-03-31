@@ -12,21 +12,21 @@ JSONRPC.@message_dispatcher dispatch_testprocess_msg begin
         reactor_channel, ps = ctx
         testrun_id = ps.testrun_id
         if testrun_id !== nothing
-            put!(reactor_channel, TestItemPassedMsg(testrun_id, ps.id, params.testItemId, params.duration, params.coverage))
+            put!(reactor_channel, TestItemPassedMsg(testrun_id, ps.id, params.testItemId, params.duration, coalesce(params.coverage, nothing)))
         end
     end
     TestItemServerProtocol.failed_notification_type => (params, ctx) -> begin
         reactor_channel, ps = ctx
         testrun_id = ps.testrun_id
         if testrun_id !== nothing
-            put!(reactor_channel, TestItemFailedMsg(testrun_id, ps.id, params.testItemId, params.messages, params.duration))
+            put!(reactor_channel, TestItemFailedMsg(testrun_id, ps.id, params.testItemId, params.messages, coalesce(params.duration, nothing)))
         end
     end
     TestItemServerProtocol.errored_notification_type => (params, ctx) -> begin
         reactor_channel, ps = ctx
         testrun_id = ps.testrun_id
         if testrun_id !== nothing
-            put!(reactor_channel, TestItemErroredMsg(testrun_id, ps.id, params.testItemId, params.messages, params.duration))
+            put!(reactor_channel, TestItemErroredMsg(testrun_id, ps.id, params.testItemId, params.messages, coalesce(params.duration, nothing)))
         end
     end
     TestItemServerProtocol.skipped_stolen_notification_type => (params, ctx) -> begin
@@ -38,7 +38,7 @@ JSONRPC.@message_dispatcher dispatch_testprocess_msg begin
     end
 end
 
-function start(testprocess_id, reactor_channel, ps::TestProcessState, env::TestEnvironment, debug_pipe_name, error_handler_file, crash_reporting_pipename, token)
+function start(testprocess_id, reactor_channel, ps::TestProcessState, env::ProcessEnv, debug_pipe_name, error_handler_file, crash_reporting_pipename, token)
     pipe_name = JSONRPC.generate_pipe_name()
     server = Sockets.listen(pipe_name)
 
@@ -55,7 +55,7 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::TestE
 
     jlArgs = copy(env.juliaArgs)
 
-    if env.juliaNumThreads!==missing && env.juliaNumThreads == "auto"
+    if env.juliaNumThreads!==nothing && env.juliaNumThreads == "auto"
         push!(jlArgs, "--threads=auto")
     end
 
@@ -75,7 +75,7 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::TestE
         end
     end
 
-    if env.juliaNumThreads!==missing && env.juliaNumThreads!="auto" && env.juliaNumThreads!=""
+    if env.juliaNumThreads!==nothing && env.juliaNumThreads!="auto" && env.juliaNumThreads!=""
         jlEnv["JULIA_NUM_THREADS"] = env.juliaNumThreads
     end
 

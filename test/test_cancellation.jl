@@ -1,5 +1,5 @@
 @testitem "Cancel running test run" setup=[TestHelpers] begin
-    using TestItemControllers: TestItemController, TestProfile, TestItemDetail, TestSetupDetail,
+    using TestItemControllers: TestItemController, TestEnvironment, TestRunItem, TestItemDetail, TestSetupDetail,
         execute_testrun, shutdown, CancellationTokens, ControllerCallbacks
     import UUIDs
 
@@ -10,21 +10,23 @@
     events_lock = ReentrantLock()
 
     callbacks = ControllerCallbacks(
-        on_testitem_started = (run_id, item_id) -> lock(events_lock) do; push!(events, (event=:started, testitem_id=item_id)); end,
-        on_testitem_passed = (run_id, item_id, duration) -> lock(events_lock) do; push!(events, (event=:passed, testitem_id=item_id)); end,
-        on_testitem_failed = (run_id, item_id, messages, duration) -> lock(events_lock) do; push!(events, (event=:failed, testitem_id=item_id)); end,
-        on_testitem_errored = (run_id, item_id, messages, duration) -> lock(events_lock) do; push!(events, (event=:errored, testitem_id=item_id)); end,
-        on_testitem_skipped = (run_id, item_id) -> lock(events_lock) do; push!(events, (event=:skipped, testitem_id=item_id)); end,
-        on_append_output = (run_id, item_id, output) -> nothing,
+        on_testitem_started = (run_id, item_id, test_env_id) -> lock(events_lock) do; push!(events, (event=:started, testitem_id=item_id)); end,
+        on_testitem_passed = (run_id, item_id, test_env_id, duration) -> lock(events_lock) do; push!(events, (event=:passed, testitem_id=item_id)); end,
+        on_testitem_failed = (run_id, item_id, test_env_id, messages, duration) -> lock(events_lock) do; push!(events, (event=:failed, testitem_id=item_id)); end,
+        on_testitem_errored = (run_id, item_id, test_env_id, messages, duration) -> lock(events_lock) do; push!(events, (event=:errored, testitem_id=item_id)); end,
+        on_testitem_skipped = (run_id, item_id, test_env_id) -> lock(events_lock) do; push!(events, (event=:skipped, testitem_id=item_id)); end,
+        on_append_output = (run_id, item_id, test_env_id, output) -> nothing,
         on_attach_debugger = (run_id, pipe_name) -> nothing,
     )
 
     controller = TestItemController(callbacks; log_level=:Debug)
-    profile = TestHelpers.make_test_profile()
+    test_env = TestHelpers.make_test_environment(; TestHelpers._env_kwargs(discovered)...)
     testrun_id = string(UUIDs.uuid4())
 
     cs = CancellationTokens.CancellationTokenSource()
     token = CancellationTokens.get_token(cs)
+
+    work_units = [TestRunItem(item.id, test_env.id, nothing, :Debug) for item in discovered.items]
 
     controller_task = @async try
         run(controller)
@@ -36,9 +38,11 @@
         execute_testrun(
             controller,
             testrun_id,
-            [profile],
+            [test_env],
             discovered.items,
+            work_units,
             discovered.setups,
+            1,
             token
         )
     catch err

@@ -26,7 +26,7 @@
         version == "1.4" && Sys.isapple() && continue
 
         @testset "Julia $version" begin
-            result = TestHelpers.run_testrun(items, discovered.setups; julia_cmd="julia", julia_args=["+$version"], timeout=600)
+            result = TestHelpers.run_testrun(items, discovered.setups, discovered; julia_cmd="julia", julia_args=["+$version"], timeout=600)
 
             passed_events = filter(e -> e.event == :passed, result.events)
             failed_events = filter(e -> e.event == :failed, result.events)
