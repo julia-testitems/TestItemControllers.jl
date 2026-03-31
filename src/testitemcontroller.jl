@@ -514,6 +514,7 @@ function handle!(c::TestItemController, msg::TestRunCancelledMsg)
     for ((testitem_id, test_env_id), _) in tr.remaining_work
         c.callbacks.on_testitem_skipped(msg.testrun_id, testitem_id, test_env_id)
     end
+    empty!(tr.remaining_work)
 
     # Kill Julia processes and return all processes to pool
     if tr.procs !== nothing
@@ -1165,6 +1166,10 @@ function handle!(c::TestItemController, msg::TestItemTimeoutMsg)
     tr = c.test_runs[msg.testrun_id]
     ps = c.test_processes[msg.testprocess_id]
 
+    if state(tr.fsm) in (TestRunCancelled, TestRunCompleted)
+        return false
+    end
+
     # Guard against stale timeout
     if ps.current_testitem_id != msg.testitem_id
         return false
@@ -1324,6 +1329,13 @@ function handle!(c::TestItemController, msg::TestProcessReviseResultMsg)
 
     if state(ps.fsm) != ProcessRevising
         @debug "Ignoring TestProcessReviseResultMsg in state $(state(ps.fsm))" testprocess_id=msg.testprocess_id
+        return false
+    end
+
+    if ps.testrun_id !== nothing && haskey(c.test_runs, ps.testrun_id) && state(c.test_runs[ps.testrun_id].fsm) in (TestRunCancelled, TestRunCompleted)
+        @debug "Test run already ended during revise, returning process to pool" testprocess_id=msg.testprocess_id
+        transition!(ps.fsm, ProcessIdle; reason="testrun_cancelled_during_revise")
+        put!(c.reactor_channel, ReturnToPoolMsg(msg.testprocess_id, ps.env))
         return false
     end
 
@@ -1584,8 +1596,17 @@ function _launch_julia_process!(c::TestItemController, ps::TestProcessState)
 end
 
 function _activate_env!(c::TestItemController, ps::TestProcessState)
+    if ps.endpoint === nothing
+        @warn "Cannot activate environment: process has no endpoint" testprocess_id=ps.id
+        try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :restart)) catch end
+        return
+    end
     put!(c.reactor_channel, TestProcessStatusChangedMsg(ps.id, "Activating"))
     @async try
+        if ps.endpoint === nothing
+            @debug "Activation cancelled: endpoint gone before send" testprocess_id=ps.id
+            return
+        end
         result = JSONRPC.send(
             ps.endpoint,
             TestItemServerProtocol.testserver_activate_env_request_type,
@@ -1607,8 +1628,11 @@ function _activate_env!(c::TestItemController, ps::TestProcessState)
         end
         put!(c.reactor_channel, TestProcessActivatedMsg(ps.id))
     catch err
-        # TODO Anything after `@error` is probably not gonna run
-        @error "Error activating environment" testprocess_id=ps.id exception=(err, catch_backtrace())
+        if err isa JSONRPC.TransportError
+            @debug "Activation failed (transport error, likely cancelled)" testprocess_id=ps.id exception=(err, catch_backtrace())
+        else
+            @error "Error activating environment" testprocess_id=ps.id exception=(err, catch_backtrace())
+        end
         try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :restart)) catch end
     end
 end
@@ -1620,6 +1644,10 @@ function _configure_testrun!(c::TestItemController, ps::TestProcessState)
         return
     end
     @async try
+        if ps.endpoint === nothing
+            @debug "Configuration cancelled: endpoint gone before send" testprocess_id=ps.id
+            return
+        end
         JSONRPC.send(
             ps.endpoint,
             TestItemServerProtocol.configure_testrun_request_type,
@@ -1632,8 +1660,11 @@ function _configure_testrun!(c::TestItemController, ps::TestProcessState)
         )
         put!(c.reactor_channel, TestProcessTestSetupsLoadedMsg(ps.id))
     catch err
-        # TODO Anything after `@error` is probably not gonna run
-        @error "Error configuring test run" testprocess_id=ps.id exception=(err, catch_backtrace())
+        if err isa JSONRPC.TransportError
+            @debug "Configuration failed (transport error, likely cancelled)" testprocess_id=ps.id exception=(err, catch_backtrace())
+        else
+            @error "Error configuring test run" testprocess_id=ps.id exception=(err, catch_backtrace())
+        end
         try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :restart)) catch end
     end
 end
@@ -1646,6 +1677,10 @@ function _send_run_testitems!(c::TestItemController, ps::TestProcessState, items
     end
     put!(c.reactor_channel, TestProcessStatusChangedMsg(ps.id, "Running"))
     @async try
+        if ps.endpoint === nothing
+            @debug "Run cancelled: endpoint gone before send" testprocess_id=ps.id
+            return
+        end
         JSONRPC.send(
             ps.endpoint,
             TestItemServerProtocol.testserver_run_testitems_batch_request_type,
@@ -1669,8 +1704,11 @@ function _send_run_testitems!(c::TestItemController, ps::TestProcessState, items
             )
         )
     catch err
-        # TODO Anything after `@error` is probably not gonna run
-        @error "Error running testitems" testprocess_id=ps.id exception=(err, catch_backtrace())
+        if err isa JSONRPC.TransportError
+            @debug "Run failed (transport error, likely cancelled)" testprocess_id=ps.id exception=(err, catch_backtrace())
+        else
+            @error "Error running testitems" testprocess_id=ps.id exception=(err, catch_backtrace())
+        end
         try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :restart)) catch end
     end
 end
@@ -1708,6 +1746,10 @@ function _start_revise!(c::TestItemController, ps::TestProcessState, new_env_has
         return
     end
     @async try
+        if ps.endpoint === nothing
+            @debug "Revise cancelled: endpoint gone before send" testprocess_id=ps.id
+            return
+        end
         needs_restart = false
 
         if new_env_hash != ps.test_env_content_hash
@@ -1726,8 +1768,11 @@ function _start_revise!(c::TestItemController, ps::TestProcessState, new_env_has
         ps.test_env_content_hash = new_env_hash
         put!(c.reactor_channel, TestProcessReviseResultMsg(ps.id, needs_restart))
     catch err
-        # TODO Anything after `@error` is probably not gonna run
-        @error "Error during revise" testprocess_id=ps.id exception=(err, catch_backtrace())
+        if err isa JSONRPC.TransportError
+            @debug "Revise failed (transport error, likely cancelled)" testprocess_id=ps.id exception=(err, catch_backtrace())
+        else
+            @error "Error during revise" testprocess_id=ps.id exception=(err, catch_backtrace())
+        end
         try put!(c.reactor_channel, TestProcessReviseResultMsg(ps.id, true)) catch end
     end
 end
