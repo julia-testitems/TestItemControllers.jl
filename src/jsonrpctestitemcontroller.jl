@@ -33,6 +33,22 @@ function _to_wire_coverage(coverage::Vector{FileCoverage})
     ]
 end
 
+"""
+    JSONRPCTestItemController(pipe_in, pipe_out; error_handler_file=nothing, crash_reporting_pipename=nothing)
+
+Create a JSONRPC-based test item controller that communicates over a pair of I/O
+streams (`pipe_in` for reading, `pipe_out` for writing).
+
+The controller translates incoming JSONRPC requests (`createTestRun`,
+`terminateTestProcess`) into calls on an internal [`TestItemController`](@ref)
+and sends progress notifications back over the same transport.
+
+Call `run(jr_controller)` to start both the JSONRPC message loop and the
+underlying reactor. The function blocks until the transport is closed or the
+controller shuts down.
+
+See [JSONRPC API](@ref) for the full protocol specification.
+"""
 mutable struct JSONRPCTestItemController
     endpoint::JSONRPC.JSONRPCEndpoint
     test_env_by_id::Dict{String,TestEnvironment}
