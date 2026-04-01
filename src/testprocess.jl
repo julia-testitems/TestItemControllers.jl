@@ -38,6 +38,18 @@ JSONRPC.@message_dispatcher dispatch_testprocess_msg begin
     end
 end
 
+function _truncate_for_log(s::AbstractString; max_bytes::Int=8192)
+    if ncodeunits(s) <= max_bytes
+        return s
+    end
+    # Find a valid character boundary at or before max_bytes
+    i = max_bytes
+    while i > 0 && !Base.isvalid(s, i)
+        i -= 1
+    end
+    return SubString(s, 1, i) * "... ($(ncodeunits(s) - i) bytes truncated)"
+end
+
 function start(testprocess_id, reactor_channel, ps::TestProcessState, env::ProcessEnv, debug_pipe_name, error_handler_file, crash_reporting_pipename, token)
     pipe_name = JSONRPC.generate_pipe_name()
     server = Sockets.listen(pipe_name)
@@ -181,7 +193,7 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
             output_for_test_proc_as_string = String(take!(output_for_test_proc))
 
             if length(output_for_test_proc_as_string) > 0
-                @debug "Forwarding process output chunk" testprocess_id ncodeunits=ncodeunits(output_for_test_proc_as_string)
+                @debug "Forwarding process output chunk" testprocess_id output=_truncate_for_log(output_for_test_proc_as_string)
                 put!(
                     reactor_channel,
                     TestProcessOutputMsg(testprocess_id, output_for_test_proc_as_string)
@@ -194,7 +206,7 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
                 if length(output_for_ti_as_string) > 0
                     testrun_id = ps.testrun_id
                     if testrun_id !== nothing
-                        @debug "Forwarding test item output chunk" testprocess_id testitem_id=something(k, missing) ncodeunits=ncodeunits(output_for_ti_as_string)
+                        @debug "Forwarding test item output chunk" testprocess_id testitem_id=something(k, missing) output=_truncate_for_log(output_for_ti_as_string)
                         put!(
                             reactor_channel,
                             AppendOutputMsg(testrun_id, testprocess_id, k, replace(output_for_ti_as_string, "\n"=>"\r\n"))
