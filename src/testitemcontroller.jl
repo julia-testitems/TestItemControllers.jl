@@ -1078,7 +1078,7 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
     recipient_pid = nothing
     if tr.procs !== nothing && haskey(tr.procs, terminated_env)
         for pid in tr.procs[terminated_env]
-            if pid != terminated_proc_id && haskey(c.test_processes, pid) && state(c.test_processes[pid].fsm) != ProcessDead && c.test_processes[pid].endpoint !== nothing
+            if pid != terminated_proc_id && haskey(c.test_processes, pid) && state(c.test_processes[pid].fsm) != ProcessDead && c.test_processes[pid].endpoint !== nothing && isopen(c.test_processes[pid].endpoint)
                 recipient_pid = pid
                 break
             end
@@ -1595,14 +1595,14 @@ function _launch_julia_process!(c::TestItemController, ps::TestProcessState)
 end
 
 function _activate_env!(c::TestItemController, ps::TestProcessState)
-    if ps.endpoint === nothing
+    if ps.endpoint === nothing || !isopen(ps.endpoint)
         @warn "Cannot activate environment: process has no endpoint" testprocess_id=ps.id
-        try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :restart)) catch end
+        try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal)) catch end
         return
     end
     put!(c.reactor_channel, TestProcessStatusChangedMsg(ps.id, "Activating"))
     @async try
-        if ps.endpoint === nothing
+        if ps.endpoint === nothing || !isopen(ps.endpoint)
             @debug "Activation cancelled: endpoint gone before send" testprocess_id=ps.id
             return
         end
@@ -1631,19 +1631,19 @@ function _activate_env!(c::TestItemController, ps::TestProcessState)
             @debug "Activation failed (transport error, likely cancelled)" testprocess_id=ps.id exception=(err, catch_backtrace())
         else
             @error "Error activating environment" testprocess_id=ps.id exception=(err, catch_backtrace())
+            try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal)) catch end
         end
-        try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :restart)) catch end
     end
 end
 
 function _configure_testrun!(c::TestItemController, ps::TestProcessState)
-    if ps.endpoint === nothing
+    if ps.endpoint === nothing || !isopen(ps.endpoint)
         @warn "Cannot configure test run: process has no endpoint" testprocess_id=ps.id
         try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal)) catch end
         return
     end
     @async try
-        if ps.endpoint === nothing
+        if ps.endpoint === nothing || !isopen(ps.endpoint)
             @debug "Configuration cancelled: endpoint gone before send" testprocess_id=ps.id
             return
         end
@@ -1663,20 +1663,20 @@ function _configure_testrun!(c::TestItemController, ps::TestProcessState)
             @debug "Configuration failed (transport error, likely cancelled)" testprocess_id=ps.id exception=(err, catch_backtrace())
         else
             @error "Error configuring test run" testprocess_id=ps.id exception=(err, catch_backtrace())
+            try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal)) catch end
         end
-        try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :restart)) catch end
     end
 end
 
 function _send_run_testitems!(c::TestItemController, ps::TestProcessState, items)
-    if ps.endpoint === nothing
+    if ps.endpoint === nothing || !isopen(ps.endpoint)
         @warn "Cannot send test items: process has no endpoint" testprocess_id=ps.id
         try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal)) catch end
         return
     end
     put!(c.reactor_channel, TestProcessStatusChangedMsg(ps.id, "Running"))
     @async try
-        if ps.endpoint === nothing
+        if ps.endpoint === nothing || !isopen(ps.endpoint)
             @debug "Run cancelled: endpoint gone before send" testprocess_id=ps.id
             return
         end
@@ -1707,8 +1707,8 @@ function _send_run_testitems!(c::TestItemController, ps::TestProcessState, items
             @debug "Run failed (transport error, likely cancelled)" testprocess_id=ps.id exception=(err, catch_backtrace())
         else
             @error "Error running testitems" testprocess_id=ps.id exception=(err, catch_backtrace())
+            try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal)) catch end
         end
-        try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :restart)) catch end
     end
 end
 
