@@ -1510,7 +1510,7 @@ function handle!(c::TestItemController, msg::TestProcessIOErrorMsg)
         return false
     end
 
-    @warn "Test process IO error" testprocess_id=msg.testprocess_id error_type=msg.error_type fsm_state=state(ps.fsm) has_testrun=(ps.testrun_id !== nothing) testrun_id=something(ps.testrun_id, "none") exit_code=msg.exit_code term_signal=msg.term_signal
+    @debug "Test process IO error" testprocess_id=msg.testprocess_id error_type=msg.error_type fsm_state=state(ps.fsm) has_testrun=(ps.testrun_id !== nothing) testrun_id=something(ps.testrun_id, "none") exit_code=msg.exit_code term_signal=msg.term_signal
 
     # Store exit info on the process state so downstream handlers can access it.
     ps.last_exit_code = msg.exit_code
@@ -1644,7 +1644,7 @@ function _launch_julia_process!(c::TestItemController, ps::TestProcessState)
             end
             if err isa JSONRPC.TransportError
                 exit_info = _exit_info_string(exit_code, term_signal)
-                @warn "Test process exited unexpectedly" testprocess_id=ps.id exit_info
+                @debug "Test process exited unexpectedly" testprocess_id=ps.id exit_info
             else
                 @error "Error in test process IO" testprocess_id=ps.id exception=(err, catch_backtrace())
             end
