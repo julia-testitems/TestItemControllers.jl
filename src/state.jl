@@ -28,6 +28,9 @@ mutable struct TestProcessState
     test_setups::Any     # Union{Nothing, Vector{TestsetupDetails}}
     coverage_root_uris::Any
     proc_log_level::Symbol
+    # Exit info captured when the OS process dies (set in _launch_julia_process! catch)
+    last_exit_code::Union{Nothing,Int}
+    last_term_signal::Union{Nothing,Int}
 end
 
 function TestProcessState(id::String, env::ProcessEnv;
@@ -57,6 +60,8 @@ function TestProcessState(id::String, env::ProcessEnv;
         nothing,                                        # test_setups
         nothing,                                        # coverage_root_uris
         :Info,                                          # proc_log_level
+        nothing,                                        # last_exit_code
+        nothing,                                        # last_term_signal
     )
 end
 

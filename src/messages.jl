@@ -145,7 +145,10 @@ end
 struct TestProcessIOErrorMsg <: ReactorMessage
     testprocess_id::String
     error_type::Symbol  # :restart or :fatal
+    exit_code::Union{Nothing,Int}
+    term_signal::Union{Nothing,Int}
 end
+TestProcessIOErrorMsg(id::String, error_type::Symbol) = TestProcessIOErrorMsg(id, error_type, nothing, nothing)
 
 struct ActivationFailedMsg <: ReactorMessage
     testprocess_id::String

@@ -269,24 +269,26 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
     @debug "Notifying reactor that process launched" testprocess_id
     put!(reactor_channel, TestProcessLaunchedMsg(testprocess_id, jl_process, endpoint))
 
-    while true
-        msg = try
-            JSONRPC.get_next_message(endpoint)
-        catch err
-            if CancellationTokens.is_cancellation_requested(token)
-                break
-            else
-                rethrow(err)
+    try
+        while true
+            msg = try
+                JSONRPC.get_next_message(endpoint)
+            catch err
+                if CancellationTokens.is_cancellation_requested(token)
+                    break
+                else
+                    rethrow(err)
+                end
             end
+            @debug "Dispatching message from test server" testprocess_id method=msg.method
+
+            dispatch_testprocess_msg(endpoint, msg, (reactor_channel, ps))
         end
-        @debug "Dispatching message from test server" testprocess_id method=msg.method
-
-        dispatch_testprocess_msg(endpoint, msg, (reactor_channel, ps))
+    finally
+        # Clean up all IO resources so no handles survive (critical for precompilation).
+        try close(endpoint) catch end
+        try close(socket) catch end
+        try close(pipe_out) catch end
+        try wait(jl_process) catch end
     end
-
-    # Clean up all IO resources so no handles survive (critical for precompilation).
-    try close(endpoint) catch end
-    try close(socket) catch end
-    try close(pipe_out) catch end
-    try wait(jl_process) catch end
 end

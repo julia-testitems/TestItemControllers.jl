@@ -977,14 +977,21 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
         delete!(tr.remaining_work, crashed_work_key)
         filter!(!isequal(crashed_item_id), items_to_redistribute)
         _cancel_timeout!(ps)
-        @info "Test process '$(terminated_proc_id)' crashed while running test item '$(item.label)', erroring it immediately"
+        exit_info = ps !== nothing ? _exit_info_string(ps.last_exit_code, ps.last_term_signal) : nothing
+        crash_detail = exit_info !== nothing ? " ($exit_info)" : ""
+        @info "Test process '$(terminated_proc_id)' crashed$(crash_detail) while running test item '$(item.label)', erroring it immediately"
+        error_message = if exit_info !== nothing
+            "Test process crashed with $exit_info while running test item '$(item.label)'"
+        else
+            "Test process crashed while running test item '$(item.label)'"
+        end
         c.callbacks.on_testitem_errored(
             msg.testrun_id,
             crashed_item_id,
             test_env_id,
             TestMessage[
                 TestMessage(
-                    "Test process crashed while running test item '$(item.label)'",
+                    error_message,
                     nothing,
                     nothing,
                     item.uri,
@@ -1503,7 +1510,11 @@ function handle!(c::TestItemController, msg::TestProcessIOErrorMsg)
         return false
     end
 
-    @warn "Test process IO error" testprocess_id=msg.testprocess_id error_type=msg.error_type fsm_state=state(ps.fsm) has_testrun=(ps.testrun_id !== nothing) testrun_id=something(ps.testrun_id, "none")
+    @warn "Test process IO error" testprocess_id=msg.testprocess_id error_type=msg.error_type fsm_state=state(ps.fsm) has_testrun=(ps.testrun_id !== nothing) testrun_id=something(ps.testrun_id, "none") exit_code=msg.exit_code term_signal=msg.term_signal
+
+    # Store exit info on the process state so downstream handlers can access it.
+    ps.last_exit_code = msg.exit_code
+    ps.last_term_signal = msg.term_signal
 
     _kill_julia_process!(ps)
 
@@ -1526,9 +1537,44 @@ end
 # Process management helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Map common POSIX signal numbers to human-readable names.
+const _SIGNAL_NAMES = Dict{Int,String}(
+    1  => "SIGHUP",
+    2  => "SIGINT",
+    3  => "SIGQUIT",
+    4  => "SIGILL",
+    6  => "SIGABRT",
+    7  => "SIGBUS",
+    8  => "SIGFPE",
+    9  => "SIGKILL",
+    11 => "SIGSEGV",
+    13 => "SIGPIPE",
+    14 => "SIGALRM",
+    15 => "SIGTERM",
+)
+
+function _signal_name(sig::Union{Nothing,Int})
+    sig === nothing && return nothing
+    return get(_SIGNAL_NAMES, sig, "signal $sig")
+end
+
+function _exit_info_string(exit_code::Union{Nothing,Int}, term_signal::Union{Nothing,Int})
+    sig = _signal_name(term_signal)
+    if sig !== nothing
+        return "$sig (signal $term_signal)"
+    elseif exit_code !== nothing
+        return "exit code $exit_code"
+    else
+        return nothing
+    end
+end
+
 function _kill_julia_process!(ps::TestProcessState)
     if ps.julia_proc_cs !== nothing
         try CancellationTokens.cancel(ps.julia_proc_cs) catch end
+    end
+    if ps.endpoint !== nothing
+        try close(ps.endpoint) catch end
     end
     if ps.jl_process !== nothing
         try kill(ps.jl_process) catch end
@@ -1587,9 +1633,25 @@ function _launch_julia_process!(c::TestItemController, ps::TestProcessState)
               launch_token)
     catch err
         if !CancellationTokens.is_cancellation_requested(launch_token)
-            @error "Error in test process IO" testprocess_id=ps.id exception=(err, catch_backtrace())
+            # Capture exit code / signal from the OS process before it is cleaned up.
+            local exit_code::Union{Nothing,Int} = nothing
+            local term_signal::Union{Nothing,Int} = nothing
+            local proc = ps.jl_process
+            if proc !== nothing
+                try wait(proc) catch end
+                exit_code = proc.exitcode
+                term_signal = proc.termsignal
+            end
+            if err isa JSONRPC.TransportError
+                exit_info = _exit_info_string(exit_code, term_signal)
+                @warn "Test process exited unexpectedly" testprocess_id=ps.id exit_info
+            else
+                @error "Error in test process IO" testprocess_id=ps.id exception=(err, catch_backtrace())
+            end
+            try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal, exit_code, term_signal)) catch end
+        else
+            try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal)) catch end
         end
-        try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal)) catch end
     end
     push!(c.process_tasks, t)
 end
