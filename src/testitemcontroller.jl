@@ -1573,11 +1573,15 @@ function _kill_julia_process!(ps::TestProcessState)
     if ps.julia_proc_cs !== nothing
         try CancellationTokens.cancel(ps.julia_proc_cs) catch end
     end
-    if ps.endpoint !== nothing
-        try close(ps.endpoint) catch end
-    end
+    # Kill the subprocess BEFORE closing the endpoint. When the process dies,
+    # the OS closes its end of the socket, giving the read task an immediate
+    # EOF/IOError. This avoids a potential deadlock where close(endpoint)
+    # waits for the read task, which waits on the still-alive process.
     if ps.jl_process !== nothing
         try kill(ps.jl_process) catch end
+    end
+    if ps.endpoint !== nothing
+        try close(ps.endpoint) catch end
     end
     ps.jl_process = nothing
     ps.endpoint = nothing
