@@ -805,12 +805,7 @@ function runner_loop(state::TestProcessState)
     stolen_testitem_ids = String[]
     testitems = TestItemServerProtocol.RunTestItem[]
 
-    # Save the correct environment state set by activate_env_request, so we can
-    # restore it before each test item. A @testitem might call Pkg.activate() or
-    # cd() which would otherwise corrupt the environment for subsequent items.
-    saved_project = Base.ACTIVE_PROJECT[]
-    saved_load_path = copy(LOAD_PATH)
-    saved_cwd = pwd()
+
 
     while true
         if isready(state.stolen_testitem_ids_channel)
@@ -849,16 +844,25 @@ function runner_loop(state::TestProcessState)
                     )
                 )
             else
-                # Restore environment state in case the previous test item mutated it
-                Base.ACTIVE_PROJECT[] = saved_project
-                append!(empty!(LOAD_PATH), saved_load_path)
-                cd(saved_cwd)
+                
+
+                # Save the correct environment state set by activate_env_request, so we can
+                # restore it after we run the test item. A @testitem might call Pkg.activate() or
+                # cd() which would otherwise corrupt the environment for subsequent items.
+                saved_project = Base.ACTIVE_PROJECT[]
+                saved_load_path = copy(LOAD_PATH)
+                saved_cwd = pwd()
 
                 print(stderr, "\x1f3805a0ad41b54562a46add40be31ca27", "$(current_testitem.id)\"", "")
                 flush(stderr)
                 ret = run_testitem(state.endpoint, current_testitem, state.mode, state.coverage_root_uris, state)
                 print(stderr, "\x1f4031af828c3d406ca42e25628bb0aa77")
                 flush(stderr)
+
+                # Restore environment state in case the previous test item mutated it
+                Base.ACTIVE_PROJECT[] = saved_project
+                append!(empty!(LOAD_PATH), saved_load_path)
+                cd(saved_cwd)
 
                 JSONRPC.send(
                     state.endpoint,
