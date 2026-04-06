@@ -21,11 +21,23 @@ end
 
     result = TestHelpers.run_testrun(erroring_items, discovered.setups, discovered)
 
+    started_events = filter(e -> e.event == :started, result.events)
     errored_events = filter(e -> e.event == :errored, result.events)
+    failed_events = filter(e -> e.event == :failed, result.events)
+    passed_events = filter(e -> e.event == :passed, result.events)
+
+    # A thrown non-@test exception must produce exactly one :errored event, never :failed or :passed.
+    @test length(started_events) == 1
     @test length(errored_events) == 1
+    @test length(failed_events) == 0
+    @test length(passed_events) == 0
     @test length(errored_events[1].messages) >= 1
 
     # The error message should mention "intentional error"
     msg_text = errored_events[1].messages[1].message
     @test occursin("intentional error", msg_text)
+
+    # A non-@test throw should carry a stack trace pointing to user code.
+    @test errored_events[1].messages[1].stack_trace !== nothing
+    @test length(errored_events[1].messages[1].stack_trace) >= 1
 end
