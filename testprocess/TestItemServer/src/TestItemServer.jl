@@ -497,8 +497,6 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
         catch err
             elapsed_time = (time_ns() - t0) / 1e6 # Convert to milliseconds
 
-            Test.pop_testset()
-
             bt = catch_backtrace()
             st = stacktrace(bt)
 
@@ -529,24 +527,23 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
 
     ts = Test.DefaultTestSet("$filepath:$(params.name)")
 
+    ret = nothing
+
     @static if VERSION < v"1.13.0-"
         Test.push_testset(ts)
-
-        ret = inner_test_function()
-
-        if ret !== nothing
-            return ret
+        try
+            ret = inner_test_function()
+        finally
+            ts = Test.pop_testset()
         end
-
-        ts = Test.pop_testset()
     else
         Test.@with_testset ts begin
             ret = inner_test_function()
-
-            if ret !== nothing
-                return ret
-            end
         end
+    end
+
+    if ret !== nothing
+        return ret
     end
 
     try
