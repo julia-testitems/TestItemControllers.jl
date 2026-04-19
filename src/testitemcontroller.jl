@@ -1618,6 +1618,10 @@ function _shutdown_test_process!(c::TestItemController, ps::TestProcessState)
 end
 
 function _launch_julia_process!(c::TestItemController, ps::TestProcessState)
+    # Generate a fresh debug pipe name for every launch so the new child
+    # process never collides with a stale pipe from a previous incarnation.
+    ps.debug_pipe_name = JSONRPC.generate_pipe_name()
+
     ps.julia_proc_cs = if ps.testrun_token !== nothing && !CancellationTokens.is_cancellation_requested(ps.testrun_token)
         CancellationTokens.CancellationTokenSource(CancellationTokens.get_token(ps.cs), ps.testrun_token)
     else
