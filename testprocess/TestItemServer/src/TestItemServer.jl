@@ -442,7 +442,7 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
             end
         catch err
             bt = catch_backtrace()
-            Base.display_error(err, bt)
+            Base.invokelatest(Base.display_error, err, bt)
             stack_frames = backtrace_to_stackframes(bt)
             return (
                 TestItemServerProtocol.errored_notification_type,
@@ -592,7 +592,7 @@ function create_test_message_for_failed(i)
     end
 
     return TestItemServerProtocol.TestMessage(
-        message = sprint(Base.show, i),
+        message = Base.invokelatest(sprint, Base.show, i),
         expectedOutput = expected,
         actualOutput = actual,
         location = TestItemServerProtocol.Location(filepath2uri(string(i.source.file)), TestItemServerProtocol.Position(i.source.line, 1)),
