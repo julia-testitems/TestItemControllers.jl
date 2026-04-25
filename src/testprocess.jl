@@ -272,9 +272,9 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
     try
         while true
             msg = try
-                JSONRPC.get_next_message(endpoint)
+                JSONRPC.get_next_message(endpoint, token=token)
             catch err
-                if CancellationTokens.is_cancellation_requested(token)
+                if CancellationTokens.is_cancellation_requested(token) || err isa CancellationTokens.OperationCanceledException
                     break
                 else
                     rethrow(err)
