@@ -98,11 +98,14 @@ background tasks and IO handles are fully closed (e.g. during precompilation).
 """
 function wait_for_shutdown(controller::TestItemController, reactor_task::Task)
     # Wait for the reactor loop to finish processing all shutdown messages
+    @debug "Now waiting for reactor task to finish"
     try wait(reactor_task) catch end
     # Wait for all process IO tasks to finish their cleanup
+    @debug "Now waiting for process IO tasks to finish"
     for t in controller.process_tasks
         try wait(t) catch end
     end
+    @debug "Finished waiting for shutdown"
     empty!(controller.process_tasks)
 end
 
