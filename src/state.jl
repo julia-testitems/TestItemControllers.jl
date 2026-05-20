@@ -18,7 +18,8 @@ mutable struct TestProcessState
     timeout_reg::Any  # Union{Nothing,CancellationTokens.CancellationTokenRegistration}
     # Process lifecycle
     cs::CancellationTokens.CancellationTokenSource        # process-level cancellation
-    julia_proc_cs::Union{Nothing,CancellationTokens.CancellationTokenSource}  # per-launch
+    termination_reg::Any   # Union{Nothing,CancellationTokens.CancellationTokenRegistration}
+    process_tasks::Vector{Task}
     is_precompile_process::Bool
     precompile_done::Bool
     test_env_content_hash::Union{Nothing,String}
@@ -51,7 +52,8 @@ function TestProcessState(id::String, env::ProcessEnv;
         nothing,                                        # timeout_cs
         nothing,                                        # timeout_reg
         CancellationTokens.CancellationTokenSource(),   # cs
-        nothing,                                        # julia_proc_cs
+        nothing,                                        # termination_reg
+        Task[],                                         # process_tasks
         is_precompile_process,
         precompile_done,
         test_env_content_hash,

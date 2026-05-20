@@ -24,7 +24,8 @@
     @test ps.current_testitem_started_at === nothing
     @test ps.timeout_cs === nothing
     @test ps.timeout_reg === nothing
-    @test ps.julia_proc_cs === nothing
+    @test ps.termination_reg === nothing
+    @test isempty(ps.process_tasks)
     @test ps.is_precompile_process == false
     @test ps.precompile_done == false
     @test ps.test_env_content_hash === nothing
