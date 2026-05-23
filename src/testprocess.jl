@@ -304,7 +304,7 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
                             TestProcessCrashException(
                                 testprocess_id,
                                 jl_process.exitcode,
-                                jl_process.term_signal,
+                                jl_process.termsignal,
                                 captured_output
                             )
                         )
@@ -316,7 +316,7 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
                 if !(err isa CancellationTokens.OperationCanceledException)
                     kill(jl_process)                    
                     wait(jl_process)
-                    put!(reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal, jl_process.exitcode, jl_process.term_signal))
+                    put!(reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal, jl_process.exitcode, jl_process.termsignal))
                 else
                     put!(reactor_channel, TestProcessTerminatedMsg(testprocess_id))
                 end
