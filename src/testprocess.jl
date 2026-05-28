@@ -111,7 +111,7 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
 
             proc_kill_registration = CancellationTokens.register(token) do
                 @info "Killing test process due to cancellation" testprocess_id
-                kill(jl_process)
+                try kill(jl_process) catch end
             end
 
             try # This try finally block closes the `proc_kill_registration`
@@ -314,7 +314,7 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
                 end
             catch err
                 if !(err isa CancellationTokens.OperationCanceledException)
-                    kill(jl_process)                    
+                    try kill(jl_process) catch end # We wrap in try catch because on Windows this fails if the process is already dead.
                     wait(jl_process)
                     put!(reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal, jl_process.exitcode, jl_process.termsignal))
                 else
