@@ -1,17 +1,24 @@
-using Documenter, TestItemControllers
+using Documenter, Revise
 
-makedocs(
-    modules = [TestItemControllers],
-    sitename = "TestItemControllers.jl",
-    warnonly = [:missing_docs],
+makedocs(;
+    modules = [Revise],
+    sitename = "Revise.jl",
+    authors = "Tim Holy <tim.holy@gmail.com> and contributors",
+    linkcheck = !("skiplinks" in ARGS),
     pages = [
         "Home" => "index.md",
-        "Julia API" => "julia-api.md",
-        "JSONRPC API" => "jsonrpc-api.md",
-        "Internals" => "internals.md",
+        "config.md",
+        "cookbook.md",
+        "limitations.md",
+        "tricks.md",
+        "debugging.md",
+        "internals.md",
+        "user_reference.md",
+        "dev_reference.md",
     ],
 )
 
 deploydocs(
-    repo = "github.com/julia-testitems/TestItemControllers.jl.git",
+    repo = "github.com/timholy/Revise.jl.git",
+    push_preview = true,
 )
