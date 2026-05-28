@@ -125,7 +125,7 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
                     buffer = ""
                     current_output_testitem_id = nothing
                     while !eof(pipe_out)
-                        data = readavailable(pipe_out, token)
+                        data = readavailable(pipe_out)
                         data_as_string = String(data)
 
                         # Capture raw output for crash diagnostics
@@ -238,7 +238,7 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
                 end
 
 
-                abort_accept_due_to_startup_failure_source = CancellationTokens.CancellationSource()
+                abort_accept_due_to_startup_failure_source = CancellationTokens.CancellationTokenSource()
                 abort_accept_due_to_startup_failure_token = CancellationTokens.get_token(abort_accept_due_to_startup_failure_source)
 
                 # Watch for subprocess exit before connection — if the process crashes during
