@@ -125,7 +125,7 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
                     buffer = ""
                     current_output_testitem_id = nothing
                     while !eof(pipe_out)
-                        data = readavailable(pipe_out)
+                        data = readavailable(pipe_out, token)
                         data_as_string = String(data)
 
                         # Capture raw output for crash diagnostics
