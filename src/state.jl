@@ -20,6 +20,10 @@ mutable struct TestProcessState
     cs::CancellationTokens.CancellationTokenSource        # process-level cancellation
     termination_reg::Any   # Union{Nothing,CancellationTokens.CancellationTokenRegistration}
     process_tasks::Vector{Task}
+    # When true, the merged TestProcessTerminatedMsg posted after this process
+    # dies will carry skip_remaining=true so the controller treats any
+    # un-started items on the process as user-skipped rather than redistributing.
+    skip_remaining_on_termination::Bool
     is_precompile_process::Bool
     precompile_done::Bool
     test_env_content_hash::Union{Nothing,String}
@@ -54,6 +58,7 @@ function TestProcessState(id::String, env::ProcessEnv;
         CancellationTokens.CancellationTokenSource(),   # cs
         nothing,                                        # termination_reg
         Task[],                                         # process_tasks
+        false,                                          # skip_remaining_on_termination
         is_precompile_process,
         precompile_done,
         test_env_content_hash,

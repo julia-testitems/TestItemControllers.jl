@@ -197,17 +197,25 @@ function handle!(c::TestItemController, msg::TerminateTestProcessMsg)
     end
 
     @info "Terminating test process '$(msg.testprocess_id)' via request"
+    # Tag the process so the merged TestProcessTerminatedMsg posted by start()
+    # when it exits will carry skip_remaining=true (this is a user-requested
+    # termination, so remaining items must not be redistributed).
+    ps.skip_remaining_on_termination = true
     _kill_julia_process!(ps)
-
-    if ps.testrun_id !== nothing
-        put!(c.reactor_channel, TestProcessTerminatedInRunMsg(ps.testrun_id, msg.testprocess_id, true))
-    end
 
     return false
 end
 
 function handle!(c::TestItemController, msg::TestProcessTerminatedMsg)
     @info "Test process '$(msg.testprocess_id)' terminated"
+
+    # Run-level redistribution must happen BEFORE pool cleanup below, because
+    # the redistribution logic still needs ps state (current_testitem_id,
+    # has_started_items, fsm state, last_exit_code, ...) which lives in
+    # c.test_processes[msg.testprocess_id].
+    if msg.testrun_id !== nothing
+        _handle_termination_during_run!(c, msg)
+    end
 
     if haskey(c.test_processes, msg.testprocess_id)
         ps = c.test_processes[msg.testprocess_id]
@@ -885,13 +893,17 @@ function handle!(c::TestItemController, msg::AppendOutputMsg)
     return false
 end
 
-function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
+# Run-level half of the merged TestProcessTerminatedMsg handler: redistribute
+# any un-started items the dead process still owned, or error/skip them according
+# to context (user-requested termination, controller shutdown, startup crash,
+# crash mid-test, post-run kill). Caller must guarantee `msg.testrun_id !== nothing`.
+function _handle_termination_during_run!(c::TestItemController, msg::TestProcessTerminatedMsg)
     if !haskey(c.test_runs, msg.testrun_id)
-        return false
+        return
     end
     tr = c.test_runs[msg.testrun_id]
     if state(tr.fsm) in (TestRunCancelled, TestRunCompleted)
-        return false
+        return
     end
 
     terminated_proc_id = msg.testprocess_id
@@ -931,13 +943,13 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
         end
     end
 
-    # Note: TestProcessTerminatedMsg for pool cleanup is posted by testprocess.jl's
-    # event loop (alongside this TestProcessTerminatedInRunMsg), so we don't post it here.
+    # Note: pool cleanup runs immediately after this helper returns, in the
+    # outer handle!(::TestProcessTerminatedMsg) — no separate message required.
 
     if isempty(items_to_redistribute)
         @info "Test process '$(terminated_proc_id)' terminated during test run, no remaining items to redistribute"
         _check_testrun_complete!(c, tr)
-        return false
+        return
     end
 
     # If explicitly terminated by user, error remaining items instead of redistributing
@@ -968,7 +980,7 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
             end
         end
         _check_testrun_complete!(c, tr)
-        return false
+        return
     end
 
     # If shutting down, skip remaining items instead of redistributing
@@ -982,13 +994,13 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
             end
         end
         _check_testrun_complete!(c, tr)
-        return false
+        return
     end
 
     # Identify whether the crash happened while a test item was actively running.
     # ps.current_testitem_id is set in TestItemStartedMsg and cleared in _cancel_timeout!
-    # (called on passed/failed/errored).  It is NOT cleared by _kill_julia_process!, so it
-    # is still valid here (TestProcessTerminatedMsg hasn't been processed yet).
+    # (called on passed/failed/errored). It is NOT cleared by _kill_julia_process!, and
+    # the outer cleanup runs only after this helper returns, so the entry is still here.
     ps = haskey(c.test_processes, terminated_proc_id) ? c.test_processes[terminated_proc_id] : nothing
     crashed_item_id = ps !== nothing ? ps.current_testitem_id : nothing
 
@@ -1057,7 +1069,7 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
                 end
             end
             _check_testrun_complete!(c, tr)
-            return false
+            return
         elseif ps !== nothing && !ps.has_started_items
             # Process reached ProcessRunning but crashed before any TestItemStartedMsg
             # was received — no item ever began executing. Error all queued items.
@@ -1087,7 +1099,7 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
                 end
             end
             _check_testrun_complete!(c, tr)
-            return false
+            return
         else
             # Process was functional and was killed after running items (e.g., timeout).
             # Fall through to redistribute remaining un-started items.
@@ -1098,7 +1110,7 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
     # Redistribute remaining un-started items (if any) to another process.
     if isempty(items_to_redistribute)
         _check_testrun_complete!(c, tr)
-        return false
+        return
     end
 
     @info "Redistributing $(length(items_to_redistribute)) un-started item(s) from crashed process '$(terminated_proc_id)'"
@@ -1185,7 +1197,7 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedInRunMsg)
         end
     end
 
-    return false
+    return
 end
 
 function handle!(c::TestItemController, msg::TestItemTimeoutMsg)
@@ -1241,11 +1253,10 @@ function handle!(c::TestItemController, msg::TestItemTimeoutMsg)
         )
     end
 
-    # Terminate the process via its cancellation source.
+    # Terminate the process via its cancellation source. start()'s IO task will
+    # post a single TestProcessTerminatedMsg once the process actually exits,
+    # which the merged handler uses to redistribute any remaining items.
     _kill_julia_process!(ps)
-
-    # Post terminated in run message to handle redistribution
-    put!(c.reactor_channel, TestProcessTerminatedInRunMsg(msg.testrun_id, msg.testprocess_id, false))
     return false
 end
 
@@ -1560,11 +1571,12 @@ function handle!(c::TestItemController, msg::TestProcessIOErrorMsg)
             c.callbacks.on_process_created(replacement_ps.id, _resolve_test_env_id(tr, replacement_ps.env))
         end
     else
-        # Fatal error — terminate
-        if ps.testrun_id !== nothing
-            put!(c.reactor_channel, TestProcessTerminatedInRunMsg(ps.testrun_id, ps.id, false))
-        end
-        put!(c.reactor_channel, TestProcessTerminatedMsg(ps.id))
+        # Fatal error — terminate. start()'s IO task may or may not have already
+        # posted a TestProcessTerminatedMsg depending on which task detected the
+        # failure; post one explicitly here so the controller always sees a
+        # terminated event for this process even if start() never reaches its
+        # own put! (e.g. activation failed before the IO loop started).
+        put!(c.reactor_channel, TestProcessTerminatedMsg(ps.id, ps.testrun_id, false))
     end
 
     return false
@@ -1745,9 +1757,6 @@ end
 function _shutdown_test_process!(c::TestItemController, ps::TestProcessState)
     @debug "Shutting down test process" testprocess_id=ps.id
     _kill_julia_process!(ps)
-    if ps.testrun_id !== nothing
-        put!(c.reactor_channel, TestProcessTerminatedInRunMsg(ps.testrun_id, ps.id, false))
-    end
 end
 
 function _launch_julia_process!(c::TestItemController, ps::TestProcessState)

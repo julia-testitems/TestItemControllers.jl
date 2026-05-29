@@ -290,7 +290,7 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
                                 dispatch_testprocess_msg(endpoint, msg, (reactor_channel, ps))
                             end
 
-                            put!(reactor_channel, TestProcessTerminatedMsg(testprocess_id))
+                            put!(reactor_channel, TestProcessTerminatedMsg(testprocess_id, ps.testrun_id, ps.skip_remaining_on_termination))
                         finally
                             close(endpoint)
                         end 
@@ -318,7 +318,7 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
                     wait(jl_process)
                     put!(reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal, jl_process.exitcode, jl_process.termsignal))
                 else
-                    put!(reactor_channel, TestProcessTerminatedMsg(testprocess_id))
+                    put!(reactor_channel, TestProcessTerminatedMsg(testprocess_id, ps.testrun_id, ps.skip_remaining_on_termination))
                 end
             finally
                 close(proc_kill_registration)
