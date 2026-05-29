@@ -21,9 +21,16 @@ struct ReturnToPoolMsg <: ReactorMessage
     env::ProcessEnv
 end
 
+# Posted from the per-process IO task in `start()` after the process has fully
+# exited. Carries enough context to drive both run-level redistribution
+# (testrun_id, skip_remaining) and controller-level pool cleanup in one handler,
+# so callers never need to coordinate two messages.
 struct TestProcessTerminatedMsg <: ReactorMessage
     testprocess_id::String
+    testrun_id::Union{Nothing,String}   # nothing if the process died outside any test run
+    skip_remaining::Bool                # only meaningful when testrun_id !== nothing
 end
+TestProcessTerminatedMsg(id::String) = TestProcessTerminatedMsg(id, nothing, false)
 
 struct TestProcessStatusChangedMsg <: ReactorMessage
     testprocess_id::String
@@ -105,12 +112,6 @@ struct AppendOutputMsg <: ReactorMessage
     testprocess_id::String
     testitem_id::Union{Nothing,String}
     output::String
-end
-
-struct TestProcessTerminatedInRunMsg <: ReactorMessage
-    testrun_id::String
-    testprocess_id::String
-    skip_remaining::Bool
 end
 
 struct TestItemTimeoutMsg <: ReactorMessage

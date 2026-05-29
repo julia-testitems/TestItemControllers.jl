@@ -72,7 +72,6 @@ into three categories:
 | `TestItemSkippedStolenMsg` | A stolen item was skipped (work stealing). |
 | `TestItemTimeoutMsg` | A test item exceeded its timeout. |
 | `AppendOutputMsg` | Captured output for a test item or process. |
-| `TestProcessTerminatedInRunMsg` | A process died while assigned to a run. |
 
 **Process-lifecycle messages** (from IO tasks)
 
