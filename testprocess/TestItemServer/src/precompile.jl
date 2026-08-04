@@ -14,7 +14,6 @@ function _precompile_()
     precompile(Tuple{typeof(parse_log_level), Symbol})
 
     # Test result formatting
-    precompile(Tuple{typeof(flatten_failed_tests!), Test.DefaultTestSet, Vector{Any}})
     precompile(Tuple{typeof(extract_expected_and_actual), Test.Fail})
 
     # Coverage

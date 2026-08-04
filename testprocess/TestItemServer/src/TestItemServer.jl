@@ -87,14 +87,6 @@ function revise_request(::Nothing, state::TestProcessState, token::CancellationT
     end
 end
 
-function flatten_failed_tests!(ts, out)
-    append!(out, i for i in ts.results if !(i isa Test.Pass))
-
-    for cts in ts.children
-        flatten_failed_tests!(cts, out)
-    end
-end
-
 function format_error_message(err, bt)
     try
         actual_err = err isa LoadError ? err.error : err
