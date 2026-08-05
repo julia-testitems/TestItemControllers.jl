@@ -10,6 +10,7 @@ import Logging
 
 include("../../../shared/testserver_protocol.jl")
 include("helper.jl")
+include("scratch_env.jl")
 
 mutable struct Testsetup
     name::String
@@ -689,23 +690,24 @@ end
 
 function activate_env_request(params::TestItemServerProtocol.ActivateEnvParams, state::TestProcessState, token::CancellationToken)
     try
-        if params.projectUri===missing
-            @static if VERSION >= v"1.5.0"
-                Pkg.activate(temp=true)
-            else
-                temp_path = mktempdir()
-                Pkg.activate(temp_path)
-            end
+        # We never activate the user's own environment: `TestEnv.activate` runs
+        # `Pkg.instantiate` on whatever is active, which writes a `Manifest.toml`
+        # into it. Mirror it into a scratch directory instead — see scratch_env.jl.
+        source_uri = params.projectUri===missing ? params.packageUri : params.projectUri
+        source_path = source_uri=="" ? nothing : uri2filepath(source_uri)
 
-            Pkg.develop(Pkg.PackageSpec(path=uri2filepath(params.packageUri)))
+        source_path===nothing && error("Cannot activate an environment: `$source_uri` is not a file path.")
 
+        scratch = scratch_env(source_path, params.packageName)
+
+        Pkg.activate(scratch.dir)
+
+        if scratch.develop_path!==nothing
+            Pkg.develop(Pkg.PackageSpec(path=scratch.develop_path))
+        end
+
+        if params.packageName!=""
             TestEnv.activate(params.packageName)
-        else
-            Pkg.activate(uri2filepath(params.projectUri))
-
-            if params.packageName!==missing
-                TestEnv.activate(params.packageName)
-            end
         end
 
         return TestItemServerProtocol.ActivateEnvResult(

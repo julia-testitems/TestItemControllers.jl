@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Test runs no longer write into the user's environment. Previously `TestEnv.activate` ran `Pkg.instantiate` on the activated project, which resolved a `Manifest.toml` into the package or project folder whenever one was missing. The environment is now mirrored into a temporary directory (with all recorded paths made absolute) and that copy is activated instead, so the user's working tree is only ever read. Two consequences: an existing `Manifest.toml` is now honoured even when no separate project is configured, where before the run re-resolved from scratch, and `Base.active_project()` inside a test item no longer points at the user's folder.
 - Fixed process termination handling ([b1904e84](https://github.com/julia-vscode/TestItemControllers.jl/commit/b1904e84))
 - Fixed resource leak in test processes ([163cd85c](https://github.com/julia-vscode/TestItemControllers.jl/commit/163cd85c))
 - Fixed various race conditions ([08489edf](https://github.com/julia-vscode/TestItemControllers.jl/commit/08489edf), [735bf2f3](https://github.com/julia-vscode/TestItemControllers.jl/commit/735bf2f3), [d2fa212c](https://github.com/julia-vscode/TestItemControllers.jl/commit/d2fa212c), [5fd4c883](https://github.com/julia-vscode/TestItemControllers.jl/commit/5fd4c883))
