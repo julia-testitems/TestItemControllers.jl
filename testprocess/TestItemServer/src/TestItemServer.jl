@@ -706,6 +706,15 @@ function activate_env_request(params::TestItemServerProtocol.ActivateEnvParams, 
             Pkg.develop(Pkg.PackageSpec(path=scratch.develop_path))
         end
 
+        # `TestEnv.activate` replaces the active project with a temporary
+        # directory of its own and precompiles in it, so preferences have to
+        # reach the test environment through the load path — which it leaves
+        # alone — rather than through the active project. Appended, so that
+        # preferences of the test environment itself take precedence.
+        if scratch.preferences_dir!==nothing && !(scratch.preferences_dir in LOAD_PATH)
+            push!(LOAD_PATH, scratch.preferences_dir)
+        end
+
         if params.packageName!=""
             TestEnv.activate(params.packageName)
         end

@@ -24,6 +24,14 @@
 # the wrapper nameless routes both through the `[sources]`/manifest entry
 # instead, which we aim back at the real package folder.
 #
+# Not activating the user's environment has a second consequence, and it is the
+# reason for the preferences carrier below. `TestEnv.activate` makes a temporary
+# directory of its own the active project and precompiles in it, carrying over
+# only the project and the manifest — never preferences. Whatever we put next to
+# the scratch project is therefore out of the picture by the time anything is
+# compiled, so the user's preferences have to reach the test environment through
+# `LOAD_PATH`, which TestEnv leaves alone.
+#
 # Everything here works at the TOML level rather than through `Pkg.Types.Project`
 # / `Pkg.Types.Manifest`. Those types, and the helpers that operate on them
 # (`Pkg.Operations.abspath!` in particular), changed shape repeatedly between
@@ -72,10 +80,14 @@ The result of [`materialize_scratch_env`](@ref).
   activating `dir`, or `nothing`. Only ever set on Julia versions without
   `[sources]` support and only when the source environment has no manifest, in
   which case there is no declarative way to pin the package to its folder.
+* `preferences_dir` — an environment directory carrying nothing but the source
+  environment's preferences, which the caller must append to `LOAD_PATH`, or
+  `nothing` when the source environment sets no preferences.
 """
 struct ScratchEnv
     dir::String
     develop_path::Union{Nothing,String}
+    preferences_dir::Union{Nothing,String}
 end
 
 const _SCRATCH_ENVS = Dict{Tuple{String,String},ScratchEnv}()
@@ -329,6 +341,98 @@ function _is_readable_manifest(manifest::AbstractDict)
     end
 end
 
+function _is_uuid(value)
+    value isa AbstractString || return false
+    try
+        Base.UUID(value)
+        return true
+    catch
+        return false
+    end
+end
+
+# `Base.collect_preferences` is handed a UUID and has to turn it into the package
+# *name* that preferences are keyed by, which it does by searching the project
+# file of the environment it is looking at (`Base.get_uuid_name`). An environment
+# that does not name the package therefore contributes no preferences for it, no
+# matter what its `LocalPreferences.toml` says — so the carrier has to reproduce
+# the source environment's name/UUID mappings.
+#
+# `[extras]` is searched for those mappings on every Julia that has preferences
+# at all (1.6 onwards) and is never consulted when loading code, which makes it
+# the one section that carries the mapping without putting the carrier in the way
+# of an `import`.
+function _preference_owners(project::AbstractDict)
+    owners = Dict{String,Any}()
+
+    name = get(project, "name", nothing)
+    uuid = get(project, "uuid", nothing)
+    name isa AbstractString && _is_uuid(uuid) && (owners[name] = uuid)
+
+    for section in ("deps", "extras", "weakdeps")
+        entries = get(project, section, nothing)
+        entries isa AbstractDict || continue
+        for (dep_name, dep_uuid) in entries
+            # A malformed entry would make `Base.get_uuid_name` throw, and the
+            # carrier is consulted for every preference lookup in the process —
+            # including ones that have nothing to do with the user's code.
+            _is_uuid(dep_uuid) && (owners[dep_name] = dep_uuid)
+        end
+    end
+
+    return owners
+end
+
+"""
+    materialize_preferences_carrier(preferences, owners, local_preferences) -> Union{Nothing,String}
+
+Build an environment directory that carries the source environment's preferences
+and nothing else, and return it — or `nothing` when there are no preferences to
+carry.
+
+`preferences` is the source project's `[preferences]` table (the lower of the two
+preference tiers) or `nothing`, `owners` the name/UUID mappings from
+[`_preference_owners`](@ref), and `local_preferences` the path to the source
+environment's `LocalPreferences.toml`, or `nothing`.
+
+The point of the directory is to be appended to `LOAD_PATH`: `Base` resolves
+preferences by walking `Base.load_path()`, and passes that same list on to every
+precompilation subprocess, so an entry there survives `TestEnv.activate`
+replacing the active project — where a file next to the scratch project does not.
+Being last in `LOAD_PATH` makes it the lowest priority, so anything the test
+environment itself declares still wins.
+
+Both tiers are copied over separately rather than merged, which leaves the
+merging — including `__clear__` entries and nested tables — to the same
+`Base.collect_preferences` that would have run on the source environment. The
+directory declares no dependencies and has no manifest, so it can never satisfy
+an `import`; it only ever contributes preferences.
+"""
+function materialize_preferences_carrier(
+    preferences::Union{Nothing,AbstractDict},
+    owners::AbstractDict,
+    local_preferences::Union{Nothing,AbstractString},
+)
+    preferences === nothing && local_preferences === nothing && return nothing
+
+    dir = mktempdir()
+    @static if VERSION < v"1.3.0"
+        atexit(() -> Base.rm(dir; recursive=true, force=true))
+    end
+
+    # `Base.env_project_file` only recognizes a directory as an environment when
+    # it holds a project file, so this is written even when there is nothing to
+    # put in it.
+    carrier = Dict{String,Any}()
+    isempty(owners) || (carrier["extras"] = owners)
+    preferences === nothing || (carrier["preferences"] = preferences)
+    _write_toml(joinpath(dir, "Project.toml"), carrier)
+
+    local_preferences === nothing || cp(local_preferences, joinpath(dir, "LocalPreferences.toml"))
+
+    return dir
+end
+
 function _write_toml(path::AbstractString, data::AbstractDict)
     open(path, "w") do io
         Pkg.TOML.print(io, data)
@@ -367,6 +471,11 @@ function materialize_scratch_env(project_path::AbstractString, package_name::Abs
     # cheaper and more portable than recomputing it. Dropped up front so that a
     # malformed hash cannot fail the readability check below.
     manifest === nothing || delete!(manifest, "project_hash")
+
+    # Captured before the sections they read are rewritten below.
+    source_preferences = get(project, "preferences", nothing)
+    source_preferences isa AbstractDict || (source_preferences = nothing)
+    preference_owners = _preference_owners(project)
 
     # The user may well have resolved their environment on a newer Julia than the
     # one under test — running a package across a version matrix is the whole
@@ -449,5 +558,9 @@ function materialize_scratch_env(project_path::AbstractString, package_name::Abs
     local_preferences = _find_env_file(src_dir, _LOCAL_PREFERENCES_NAMES)
     local_preferences === nothing || cp(local_preferences, joinpath(env_dir, "LocalPreferences.toml"))
 
-    return ScratchEnv(env_dir, develop_path)
+    # That copy only covers the stretch where the scratch environment is the
+    # active one. `TestEnv.activate` takes that away again, hence the carrier.
+    preferences_dir = materialize_preferences_carrier(source_preferences, preference_owners, local_preferences)
+
+    return ScratchEnv(env_dir, develop_path, preferences_dir)
 end

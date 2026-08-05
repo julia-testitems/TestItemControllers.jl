@@ -185,6 +185,129 @@ end
     @test occursin("vanilla", read(mirrored, String))
 end
 
+@testitem "No preferences means no carrier environment" setup=[ScratchEnvHelpers, ScratchEnvImpl] begin
+    work = mktempdir()
+    pkg_path = ScratchEnvHelpers.materialize_package(
+        joinpath(work, "Plain");
+        name="Plain",
+        uuid="a1b2c3d4-0001-0002-0003-000000000206"
+    )
+
+    env = ScratchEnvImpl.materialize_scratch_env(pkg_path, "Plain")
+
+    # Nothing to carry, so nothing gets appended to the test process' `LOAD_PATH`.
+    @test env.preferences_dir === nothing
+end
+
+@testitem "The preferences carrier survives the active project being swapped" setup=[ScratchEnvHelpers, ScratchEnvImpl] begin
+    import Pkg
+
+    # What `TestEnv.activate` does to us: it makes a temporary directory of its
+    # own the active project, so the copy of `LocalPreferences.toml` sitting next
+    # to the scratch project stops being reachable. The carrier goes on
+    # `LOAD_PATH`, which TestEnv leaves alone.
+    work = mktempdir()
+    uuid = "a1b2c3d4-0001-0002-0003-000000000207"
+    pkg_path = ScratchEnvHelpers.materialize_package(
+        joinpath(work, "Carried");
+        name="Carried",
+        uuid=uuid
+    )
+    write(joinpath(pkg_path, "LocalPreferences.toml"), """
+    [Carried]
+    flavour = "vanilla"
+    """)
+
+    env = ScratchEnvImpl.materialize_scratch_env(pkg_path, "Carried")
+
+    carrier = env.preferences_dir
+    @test carrier !== nothing
+
+    project = Pkg.TOML.parsefile(joinpath(carrier, "Project.toml"))
+
+    # `Base.collect_preferences` maps the UUID it is given to a package name via
+    # the project file of the environment it is looking at, and skips the
+    # environment entirely when that fails.
+    @test project["extras"]["Carried"] == uuid
+
+    # In `[extras]` rather than `[deps]`, and with no manifest: the carrier can
+    # never satisfy an `import`, it only ever contributes preferences.
+    @test !haskey(project, "deps")
+    @test !isfile(joinpath(carrier, "Manifest.toml"))
+
+    @test occursin("vanilla", read(joinpath(carrier, "LocalPreferences.toml"), String))
+
+    saved_project = Base.ACTIVE_PROJECT[]
+    saved_load_path = copy(LOAD_PATH)
+    try
+        unrelated = mktempdir()
+        write(joinpath(unrelated, "Project.toml"), "")
+        Base.ACTIVE_PROJECT[] = joinpath(unrelated, "Project.toml")
+
+        # Without the carrier the preference is gone at this point...
+        @test !haskey(Base.get_preferences(Base.UUID(uuid)), "flavour")
+
+        # ...and with it appended it resolves again, which is all Preferences.jl
+        # and every precompilation subprocess ever ask for.
+        push!(LOAD_PATH, carrier)
+        @test Base.get_preferences(Base.UUID(uuid))["flavour"] == "vanilla"
+    finally
+        Base.ACTIVE_PROJECT[] = saved_project
+        append!(empty!(LOAD_PATH), saved_load_path)
+    end
+end
+
+@testitem "The preferences carrier includes the project's own [preferences]" setup=[ScratchEnvHelpers, ScratchEnvImpl] begin
+    import Pkg
+
+    # The other tier Preferences.jl reads: a `[preferences]` section inside the
+    # project file itself. Both are carried over separately, so that the merge —
+    # `[preferences]` first, `LocalPreferences.toml` on top — stays `Base`'s to do.
+    work = mktempdir()
+    uuid = "a1b2c3d4-0001-0002-0003-000000000208"
+    pkg_path = ScratchEnvHelpers.materialize_package(
+        joinpath(work, "Embedded");
+        name="Embedded",
+        uuid=uuid
+    )
+    open(joinpath(pkg_path, "Project.toml"), "a") do io
+        print(io, """
+
+        [preferences.Embedded]
+        flavour = "chocolate"
+        topping = "sprinkles"
+        """)
+    end
+    write(joinpath(pkg_path, "LocalPreferences.toml"), """
+    [Embedded]
+    flavour = "vanilla"
+    """)
+
+    env = ScratchEnvImpl.materialize_scratch_env(pkg_path, "Embedded")
+    carrier = env.preferences_dir
+    @test carrier !== nothing
+
+    project = Pkg.TOML.parsefile(joinpath(carrier, "Project.toml"))
+    @test project["preferences"]["Embedded"]["topping"] == "sprinkles"
+
+    saved_project = Base.ACTIVE_PROJECT[]
+    saved_load_path = copy(LOAD_PATH)
+    try
+        unrelated = mktempdir()
+        write(joinpath(unrelated, "Project.toml"), "")
+        Base.ACTIVE_PROJECT[] = joinpath(unrelated, "Project.toml")
+        push!(LOAD_PATH, carrier)
+
+        prefs = Base.get_preferences(Base.UUID(uuid))
+        @test prefs["topping"] == "sprinkles"
+        # The local file wins over the project section, as it does everywhere else.
+        @test prefs["flavour"] == "vanilla"
+    finally
+        Base.ACTIVE_PROJECT[] = saved_project
+        append!(empty!(LOAD_PATH), saved_load_path)
+    end
+end
+
 @testitem "materialize_scratch_env drops a manifest Pkg cannot read" setup=[ScratchEnvHelpers, ScratchEnvImpl] begin
     # A manifest resolved by a different Julia can be in a format this one does
     # not understand. Copying it verbatim would make `Pkg.activate` itself throw,
@@ -353,4 +476,95 @@ end
 
     @test length(ScratchEnvHelpers.passed_ids(result)) == 1
     @test isempty(ScratchEnvHelpers.error_messages(result))
+end
+
+@testitem "A test item sees the package's LocalPreferences.toml" setup=[TestHelpers, ScratchEnvHelpers] begin
+    work = mktempdir()
+    uuid = "a1b2c3d4-0001-0002-0003-000000000106"
+    pkg_path = ScratchEnvHelpers.materialize_package(
+        joinpath(work, "Flavoured");
+        name="Flavoured",
+        uuid=uuid
+    )
+    write(joinpath(pkg_path, "LocalPreferences.toml"), """
+    [Flavoured]
+    flavour = "vanilla"
+    """)
+
+    # `Base.get_preferences` is what `Preferences.load_preference` calls, and what
+    # decides whether e.g. PrecompileTools runs a package's workload while the
+    # test process precompiles it.
+    write(joinpath(pkg_path, "test", "tests.jl"), """
+    @testitem "preferences are visible" begin
+        prefs = Base.get_preferences(Base.UUID("$uuid"))
+        @test get(prefs, "flavour", nothing) == "vanilla"
+    end
+    """)
+
+    discovered = TestHelpers.discover_test_items(pkg_path)
+    result = TestHelpers.run_testrun(discovered)
+
+    @test length(ScratchEnvHelpers.passed_ids(result)) == 1
+    @test isempty(ScratchEnvHelpers.error_messages(result))
+end
+
+@testitem "A test item sees a separate project's LocalPreferences.toml" setup=[TestHelpers, ScratchEnvHelpers] begin
+    using TestItemControllers: filepath2uri
+
+    # Issue #28: the preference lives in the project environment the user
+    # configured, not in the package folder, and the package under test is one of
+    # that environment's deved dependencies.
+    work = mktempdir()
+    uuid = "a1b2c3d4-0001-0002-0003-000000000107"
+    pkg_path = ScratchEnvHelpers.materialize_package(
+        joinpath(work, "packages", "Seasoned");
+        name="Seasoned",
+        uuid=uuid
+    )
+
+    project_path = joinpath(work, "env")
+    mkpath(project_path)
+    write(joinpath(project_path, "Project.toml"), """
+    [deps]
+    Seasoned = "$uuid"
+    """)
+    write(joinpath(project_path, "Manifest.toml"), """
+    julia_version = "$(VERSION)"
+    manifest_format = "2.0"
+
+    [[deps.Seasoned]]
+    path = "../packages/Seasoned"
+    uuid = "$uuid"
+    version = "0.1.0"
+    """)
+    write(joinpath(project_path, "LocalPreferences.toml"), """
+    [Seasoned]
+    flavour = "vanilla"
+    """)
+
+    write(joinpath(pkg_path, "test", "tests.jl"), """
+    @testitem "preferences are visible" begin
+        prefs = Base.get_preferences(Base.UUID("$uuid"))
+        @test get(prefs, "flavour", nothing) == "vanilla"
+    end
+    """)
+
+    project_before = ScratchEnvHelpers.snapshot(project_path)
+
+    discovered = TestHelpers.discover_test_items(pkg_path)
+    @test length(discovered.items) == 1
+
+    result = TestHelpers.run_testrun(
+        discovered.items,
+        discovered.setups;
+        package_name="Seasoned",
+        package_uri=filepath2uri(pkg_path),
+        project_uri=filepath2uri(project_path)
+    )
+
+    @test length(ScratchEnvHelpers.passed_ids(result)) == 1
+    @test isempty(ScratchEnvHelpers.error_messages(result))
+
+    # Reading preferences must not have made us write anything either.
+    @test ScratchEnvHelpers.snapshot(project_path) == project_before
 end
