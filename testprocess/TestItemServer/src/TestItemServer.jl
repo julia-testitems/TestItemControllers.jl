@@ -263,7 +263,10 @@ function process_coverage_data(coverage_results)
     return coverage_info
 end
 
-function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode::String, coverage_root_uris::Union{Nothing,Vector{String}}, state::TestProcessState)
+# `testcode_module_parent` exists for the precompile workload: during package-image
+# generation `Main` is closed, so the throwaway module holding the test code must be
+# created inside the (still open) TestItemServer module instead.
+function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode::String, coverage_root_uris::Union{Nothing,Vector{String}}, state::TestProcessState; testcode_module_parent::Module=Main)
     JSONRPC.send(
         endpoint,
         TestItemServerProtocol.started_notification_type,
@@ -346,7 +349,7 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
         end
     end
 
-    mod = Core.eval(Main, :(module $(gensym()) end))
+    mod = Core.eval(testcode_module_parent, :(module $(gensym()) end))
 
     if params.useDefaultUsings
         try

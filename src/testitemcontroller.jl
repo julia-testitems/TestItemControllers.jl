@@ -389,9 +389,20 @@ function handle!(c::TestItemController, msg::GetProcsForTestRunMsg)
                 end
             end
 
-            julia_version_as_string = read(Cmd(`$(k.juliaCmd) $(k.juliaArgs) --version`, detach=false, env=jlEnv), String)
-            julia_version_as_string = julia_version_as_string[length("julia version")+2:end]
-            julia_version = VersionNumber(julia_version_as_string)
+            # The subprocess exists only to detect Julia <= 1.10 for the
+            # precompile hack below. When the test processes use exactly the
+            # binary this process is running, the answer is already known —
+            # skip the ~0.3-0.5s `julia --version` launch. (A bare "julia"
+            # must still be probed: PATH or a juliaup channel can resolve it
+            # to a different version than the running process.)
+            julia_version = if isempty(k.juliaArgs) &&
+                    k.juliaCmd == joinpath(Sys.BINDIR, Base.julia_exename())
+                VERSION
+            else
+                julia_version_as_string = read(Cmd(`$(k.juliaCmd) $(k.juliaArgs) --version`, detach=false, env=jlEnv), String)
+                julia_version_as_string = julia_version_as_string[length("julia version")+2:end]
+                VersionNumber(julia_version_as_string)
+            end
 
             if julia_version <= v"1.10.0"
                 testserver_precompile_script = joinpath(@__DIR__, "../testprocess/app/testserver_precompile.jl")

@@ -45,4 +45,6 @@ include("testprocess.jl")
 include("testitemcontroller.jl")
 include("jsonrpctestitemcontroller.jl")
 
+include("precompile.jl")
+
 end # module TestItemControllers
