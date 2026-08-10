@@ -36,6 +36,7 @@ env = TestEnvironment(
     "file:///path/to/MyPackage",  # package_uri
     nothing,                      # project_uri
     nothing,                      # env_content_hash
+    nothing,                      # check_bounds ("auto" default; "yes" for Pkg.test-style forced bounds checks)
 )
 
 item = TestItemDetail(

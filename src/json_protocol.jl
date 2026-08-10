@@ -15,6 +15,7 @@ using ..JSONRPC: @dict_readable, RequestType, NotificationType, Outbound
     packageUri::String
     projectUri::Union{Missing,String}
     envContentHash::Union{Missing,String}
+    checkBounds::Union{Missing,String}
 end
 
 @dict_readable struct TestRunItem <: JSONRPC.Outbound

@@ -71,6 +71,13 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
 
             jlArgs = copy(env.juliaArgs)
 
+            # "auto" is Julia's default; only pass the flag when overriding. Old Julia
+            # versions (< 1.8) reject `--check-bounds=auto` outright, so omitting it is
+            # also required for them to launch at all.
+            if env.check_bounds != "auto"
+                push!(jlArgs, "--check-bounds=$(env.check_bounds)")
+            end
+
             if env.juliaNumThreads!==nothing && env.juliaNumThreads == "auto"
                 push!(jlArgs, "--threads=auto")
             end
@@ -98,7 +105,7 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
             error_handler_file = error_handler_file === nothing ? [] : [error_handler_file]
             crash_reporting_pipename = crash_reporting_pipename === nothing ? [] : [crash_reporting_pipename]
 
-            cmd_args = `$(env.juliaCmd) $(env.juliaArgs) --check-bounds=yes --startup-file=no --history-file=no --depwarn=no $coverage_arg $testserver_script $pipe_name $(debug_pipe_name) $(error_handler_file...) $(crash_reporting_pipename...)`
+            cmd_args = `$(env.juliaCmd) $(jlArgs) --startup-file=no --history-file=no --depwarn=no $coverage_arg $testserver_script $pipe_name $(debug_pipe_name) $(error_handler_file...) $(crash_reporting_pipename...)`
             @info "Launching Julia test server process" testprocess_id pipe_name
             @debug "Full launch command" testprocess_id cmd=string(cmd_args) testserver_script mode=env.mode
             jl_process = open(

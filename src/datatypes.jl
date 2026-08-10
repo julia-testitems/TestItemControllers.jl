@@ -22,6 +22,7 @@ Describes a Julia process configuration for running test items.
 - `package_uri::String` — file URI of the package root.
 - `project_uri::Union{Nothing,String}` — file URI of a custom project (or `nothing` for the package default).
 - `env_content_hash::Union{Nothing,String}` — opaque hash of the environment content, used to decide whether a pooled process can be reused without a restart.
+- `check_bounds::Union{Nothing,String}` — value for the test process's `--check-bounds` flag: `"auto"` (or `nothing`, the default) respects `@inbounds` annotations and lets the test process reuse the precompile caches of normal dev sessions; `"yes"` forces bounds checks everywhere (the `Pkg.test` behavior) at the cost of precompiling the whole environment into a separate cache slot on the first run.
 """
 struct TestEnvironment
     id::String
@@ -34,6 +35,15 @@ struct TestEnvironment
     package_uri::String
     project_uri::Union{Nothing,String}
     env_content_hash::Union{Nothing,String}
+    check_bounds::Union{Nothing,String}
+
+    function TestEnvironment(id, julia_cmd, julia_args, julia_num_threads, julia_env, mode,
+            package_name, package_uri, project_uri, env_content_hash, check_bounds=nothing)
+        check_bounds in (nothing, "yes", "auto") ||
+            throw(ArgumentError("check_bounds must be \"yes\" or \"auto\", got $(repr(check_bounds))"))
+        return new(id, julia_cmd, julia_args, julia_num_threads, julia_env, mode,
+            package_name, package_uri, project_uri, env_content_hash, check_bounds)
+    end
 end
 
 """

@@ -39,11 +39,14 @@ mutable struct TestItemController{CB<:ControllerCallbacks}
             julia_cmd::String,
             julia_args::Vector{String},
             env::Dict{String,Union{String,Nothing}},
-            coverage::Bool
+            coverage::Bool,
+            check_bounds::String
         }
     }
 
     precompiled_envs::Set{ProcessEnv}
+
+    julia_version_cache::Dict{Tuple{String,Vector{String}},VersionNumber}
 
     error_handler_file::Union{Nothing,String}
     crash_reporting_pipename::Union{Nothing,String}
@@ -63,8 +66,9 @@ mutable struct TestItemController{CB<:ControllerCallbacks}
             Dict{String,TestProcessState}(),
             Dict{ProcessEnv,Vector{String}}(),
             Dict{String,TestRunState}(),
-            Set{@NamedTuple{julia_cmd::String,julia_args::Vector{String},env::Dict{String,Union{String,Nothing}},coverage::Bool}}(),
+            Set{@NamedTuple{julia_cmd::String,julia_args::Vector{String},env::Dict{String,Union{String,Nothing}},coverage::Bool,check_bounds::String}}(),
             Set{ProcessEnv}(),
+            Dict{Tuple{String,Vector{String}},VersionNumber}(),
             error_handler_file,
             crash_reporting_pipename,
             log_level,
@@ -367,7 +371,8 @@ function handle!(c::TestItemController, msg::GetProcsForTestRunMsg)
                 julia_cmd=k.juliaCmd,
                 julia_args=k.juliaArgs,
                 env=k.env,
-                coverage=k.mode == "Coverage"
+                coverage=k.mode == "Coverage",
+                check_bounds=k.check_bounds
             ) in c.testprocess_precompile_not_required)
 
             @debug "Checking whether test environment precompilation is needed"
@@ -399,15 +404,20 @@ function handle!(c::TestItemController, msg::GetProcsForTestRunMsg)
                     k.juliaCmd == joinpath(Sys.BINDIR, Base.julia_exename())
                 VERSION
             else
-                julia_version_as_string = read(Cmd(`$(k.juliaCmd) $(k.juliaArgs) --version`, detach=false, env=jlEnv), String)
-                julia_version_as_string = julia_version_as_string[length("julia version")+2:end]
-                VersionNumber(julia_version_as_string)
+                get!(c.julia_version_cache, (k.juliaCmd, k.juliaArgs)) do
+                    julia_version_as_string = read(Cmd(`$(k.juliaCmd) $(k.juliaArgs) --version`, detach=false, env=jlEnv), String)
+                    julia_version_as_string = julia_version_as_string[length("julia version")+2:end]
+                    VersionNumber(julia_version_as_string)
+                end
             end
 
             if julia_version <= v"1.10.0"
                 testserver_precompile_script = joinpath(@__DIR__, "../testprocess/app/testserver_precompile.jl")
 
-                precompile_success = success(Cmd(`$(k.juliaCmd) $(k.juliaArgs) --check-bounds=yes --startup-file=no --history-file=no --depwarn=no $coverage_arg $testserver_precompile_script`, detach=false, env=jlEnv))
+                # "auto" is Julia's default and rejected as a flag value before 1.8 — only
+                # pass --check-bounds when overriding (matches the test process launch).
+                check_bounds_args = k.check_bounds == "auto" ? String[] : ["--check-bounds=$(k.check_bounds)"]
+                precompile_success = success(Cmd(`$(k.juliaCmd) $(k.juliaArgs) $(check_bounds_args) --startup-file=no --history-file=no --depwarn=no $coverage_arg $testserver_precompile_script`, detach=false, env=jlEnv))
 
                 @debug "Precompile of test server" precompile_success
             end
@@ -416,7 +426,8 @@ function handle!(c::TestItemController, msg::GetProcsForTestRunMsg)
                 julia_cmd=k.juliaCmd,
                 julia_args=k.juliaArgs,
                 env=k.env,
-                coverage=k.mode == "Coverage"
+                coverage=k.mode == "Coverage",
+                check_bounds=k.check_bounds
             ))
         end
 
