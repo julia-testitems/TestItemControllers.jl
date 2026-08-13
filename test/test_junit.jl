@@ -1,0 +1,254 @@
+@testitem "JUnit XML basic structure" begin
+    using TestItemControllers: write_junit_xml
+    using TestItemControllers.Results
+
+    result = TestrunResult(
+        TestrunResultDefinitionError[],
+        [
+            TestrunResultTestitem(
+                "passing item",
+                "file:///c%3A/pkg/test/a.jl",
+                [TestrunResultTestitemProfile("Julia 1.12", :passed, 12.5, nothing, nothing)],
+            ),
+            TestrunResultTestitem(
+                "failing item",
+                "file:///c%3A/pkg/test/a.jl",
+                [TestrunResultTestitemProfile(
+                    "Julia 1.12",
+                    :failed,
+                    873.0,
+                    [TestrunResultMessage("Test Failed at a.jl:5", "1", "2", "file:///c%3A/pkg/test/a.jl", 5, 9, nothing)],
+                    nothing,
+                )],
+            ),
+            TestrunResultTestitem(
+                "erroring item",
+                "file:///c%3A/pkg/test/b.jl",
+                [TestrunResultTestitemProfile("Julia 1.12", :errored, 5.0,
+                    [TestrunResultMessage("BoundsError", nothing, nothing, "file:///c%3A/pkg/test/b.jl", 2, 1, nothing)],
+                    nothing)],
+            ),
+            TestrunResultTestitem(
+                "skipped item",
+                "file:///c%3A/pkg/test/b.jl",
+                [TestrunResultTestitemProfile("Julia 1.12", :skipped, nothing, nothing, nothing)],
+            ),
+            TestrunResultTestitem(
+                "crashed item",
+                "file:///c%3A/pkg/test/b.jl",
+                [TestrunResultTestitemProfile("Julia 1.12", :crash, nothing, nothing, nothing)],
+            ),
+        ],
+        Dict{String,String}(),
+    )
+
+    io = IOBuffer()
+    write_junit_xml(io, result; root="file:///c%3A/pkg")
+    xml = String(take!(io))
+
+    @test startswith(xml, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
+    @test occursin("<testsuites tests=\"5\"", xml)
+    @test occursin("failures=\"1\"", xml)
+    @test occursin("skipped=\"1\"", xml)
+    # errored + crash both count as errors
+    @test occursin("errors=\"2\"", xml)
+
+    # One testsuite per file, named by the path relative to the root, `/`-separated.
+    @test occursin("<testsuite name=\"test/a.jl\"", xml)
+    @test occursin("<testsuite name=\"test/b.jl\"", xml)
+    @test !occursin("\\", xml)
+
+    @test occursin("classname=\"test/a.jl\" name=\"passing item\" id=\"test/a.jl::passing item\"", xml)
+    @test occursin("time=\"0.0125\"", xml)
+    @test occursin("<failure message=\"Test Failed at a.jl:5\" type=\"failed\">", xml)
+    @test occursin("<error message=\"BoundsError\" type=\"errored\">", xml)
+    @test occursin("<skipped/>", xml)
+    # A crash reports no messages, but must still produce an element or it reads as a pass.
+    @test occursin("type=\"crash\"", xml)
+    @test occursin("</testsuites>", xml)
+end
+
+@testitem "JUnit XML escapes XML-hostile content" begin
+    using TestItemControllers: write_junit_xml
+    using TestItemControllers.Results
+
+    result = TestrunResult(
+        TestrunResultDefinitionError[],
+        [TestrunResultTestitem(
+            "a < b & \"c\" 'd' ]]>",
+            "file:///c%3A/pkg/test/a.jl",
+            [TestrunResultTestitemProfile(
+                "P",
+                :failed,
+                1.0,
+                [TestrunResultMessage("expected <Int> & got ]]>", nothing, nothing, "file:///c%3A/pkg/test/a.jl", 1, 1, nothing)],
+                "output with <tags> & ampersands and ]]> in it",
+            )],
+        )],
+        Dict{String,String}(),
+    )
+
+    io = IOBuffer()
+    write_junit_xml(io, result; root="file:///c%3A/pkg")
+    xml = String(take!(io))
+
+    @test !occursin("]]>", xml)
+    @test occursin("]]&gt;", xml)
+    @test occursin("&amp;", xml)
+    @test occursin("&lt;", xml)
+    @test occursin("&quot;", xml)
+    @test occursin("&apos;", xml)
+    # No raw `<` survives except as part of a tag we wrote ourselves.
+    @test !occursin("<Int>", xml)
+    @test !occursin("<tags>", xml)
+end
+
+@testitem "JUnit XML strips ANSI and keeps unicode" begin
+    using TestItemControllers: write_junit_xml
+    using TestItemControllers.Results
+
+    output = "\e[31mred text\e[0m and \e[1;32mbold green\e[0m — καλά 日本語 🎉\n\e[2Kcleared"
+
+    result = TestrunResult(
+        TestrunResultDefinitionError[],
+        [TestrunResultTestitem(
+            "unicode ✓ item",
+            "file:///c%3A/pkg/test/ünïcode.jl",
+            [TestrunResultTestitemProfile("P", :passed, 1.0, nothing, output)],
+        )],
+        Dict{String,String}(),
+    )
+
+    io = IOBuffer()
+    write_junit_xml(io, result; root="file:///c%3A/pkg")
+    xml = String(take!(io))
+
+    @test !occursin('\e', xml)
+    @test occursin("red text", xml)
+    @test occursin("bold green", xml)
+    @test occursin("cleared", xml)
+    @test occursin("— καλά 日本語 🎉", xml)
+    @test occursin("unicode ✓ item", xml)
+    @test occursin("<system-out>", xml)
+end
+
+@testitem "JUnit XML emits perf as properties" begin
+    using TestItemControllers: write_junit_xml
+    using TestItemControllers.Results
+
+    result = TestrunResult(
+        TestrunResultDefinitionError[],
+        [
+            TestrunResultTestitem(
+                "with perf",
+                "file:///c%3A/pkg/test/a.jl",
+                [TestrunResultTestitemProfile("P", :passed, 1.0, nothing, nothing,
+                    TestrunResultPerfStats(1.0, 2048, 17, 0.5, 100.0, nothing))],
+            ),
+            TestrunResultTestitem(
+                "without perf",
+                "file:///c%3A/pkg/test/a.jl",
+                [TestrunResultTestitemProfile("P", :passed, 1.0, nothing, nothing)],
+            ),
+        ],
+        Dict{String,String}(),
+    )
+
+    io = IOBuffer()
+    write_junit_xml(io, result; root="file:///c%3A/pkg")
+    xml = String(take!(io))
+
+    @test occursin("<property name=\"elapsed_ms\" value=\"1.0\"/>", xml)
+    @test occursin("<property name=\"bytes\" value=\"2048\"/>", xml)
+    @test occursin("<property name=\"allocs\" value=\"17\"/>", xml)
+    @test occursin("<property name=\"compile_time_ms\" value=\"100.0\"/>", xml)
+    # `nothing` fields are omitted rather than written as an empty value.
+    @test !occursin("recompile_time_ms", xml)
+    # The item without perf is a self-closing testcase with no properties block.
+    @test occursin("name=\"without perf\" id=\"test/a.jl::without perf\" time=\"0.001\"/>", xml)
+end
+
+@testitem "JUnit XML reports definition errors" begin
+    using TestItemControllers: write_junit_xml
+    using TestItemControllers.Results
+
+    result = TestrunResult(
+        [TestrunResultDefinitionError("Invalid testitem", "file:///c%3A/pkg/test/bad.jl", 3, 1)],
+        TestrunResultTestitem[],
+        Dict{String,String}(),
+    )
+
+    io = IOBuffer()
+    write_junit_xml(io, result; root="file:///c%3A/pkg")
+    xml = String(take!(io))
+
+    @test occursin("<testsuite name=\"Definition errors\"", xml)
+    @test occursin("type=\"definition_error\"", xml)
+    @test occursin("Invalid testitem", xml)
+    @test occursin("<testsuites tests=\"1\" failures=\"0\" errors=\"1\"", xml)
+end
+
+@testitem "JUnit XML without a root keeps absolute paths" begin
+    using TestItemControllers: write_junit_xml
+    using TestItemControllers.Results
+
+    result = TestrunResult(
+        TestrunResultDefinitionError[],
+        [TestrunResultTestitem("item", "file:///c%3A/pkg/test/a.jl",
+            [TestrunResultTestitemProfile("P", :passed, 1.0, nothing, nothing)])],
+        Dict{String,String}(),
+    )
+
+    io = IOBuffer()
+    write_junit_xml(io, result)
+    xml = String(take!(io))
+
+    @test occursin("c:/pkg/test/a.jl", xml)
+end
+
+@testitem "JUnit XML file output" begin
+    using TestItemControllers: write_junit_xml
+    using TestItemControllers.Results
+
+    result = TestrunResult(
+        TestrunResultDefinitionError[],
+        [TestrunResultTestitem("item", "file:///c%3A/pkg/test/a.jl",
+            [TestrunResultTestitemProfile("P", :passed, 1.0, nothing, nothing)])],
+        Dict{String,String}(),
+    )
+
+    mktempdir() do dir
+        path = joinpath(dir, "junit.xml")
+        write_junit_xml(path, result; root="file:///c%3A/pkg")
+        xml = read(path, String)
+        @test occursin("<testsuites", xml)
+        @test occursin("name=\"item\"", xml)
+    end
+end
+
+@testitem "LCOV export" begin
+    using TestItemControllers: write_lcov
+    using TestItemControllers.Results
+
+    empty_result = TestrunResult(TestrunResultDefinitionError[], TestrunResultTestitem[], Dict{String,String}())
+
+    io = IOBuffer()
+    @test write_lcov(io, empty_result) == false
+    @test isempty(take!(io))
+
+    covered = TestrunResult(
+        TestrunResultDefinitionError[],
+        TestrunResultTestitem[],
+        Dict{String,String}(),
+        [TestrunResultFileCoverage("file:///c%3A/pkg/src/f.jl", Union{Nothing,Int}[nothing, 3, 0, nothing])],
+    )
+
+    io = IOBuffer()
+    @test write_lcov(io, covered) == true
+    lcov = String(take!(io))
+    @test occursin("SF:", lcov)
+    @test occursin("f.jl", lcov)
+    @test occursin("DA:2,3", lcov)
+    @test occursin("DA:3,0", lcov)
+    @test occursin("end_of_record", lcov)
+end

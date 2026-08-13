@@ -152,7 +152,7 @@ function handle!(c::TestItemController, ::ShutdownMsg)
             CancellationTokens.cancel(tr.cancellation_source)
             for ((testitem_id, test_env_id), _) in tr.remaining_work
                 push!(tr.reported_items, testitem_id)
-                c.callbacks.on_testitem_skipped(trid, testitem_id, test_env_id)
+                _notify_testitem_skipped(c.callbacks, trid, testitem_id, test_env_id)
             end
             transition!(tr.fsm, TestRunCancelled; reason="shutdown")
             try put!(tr.completion_channel, nothing) catch end
@@ -567,7 +567,7 @@ function handle!(c::TestItemController, msg::TestRunCancelledMsg)
     # Report all remaining test items as skipped
     for ((testitem_id, test_env_id), _) in tr.remaining_work
         push!(tr.reported_items, testitem_id)
-        c.callbacks.on_testitem_skipped(msg.testrun_id, testitem_id, test_env_id)
+        _notify_testitem_skipped(c.callbacks, msg.testrun_id, testitem_id, test_env_id)
     end
     empty!(tr.remaining_work)
 
@@ -761,7 +761,7 @@ function handle!(c::TestItemController, msg::TestItemPassedMsg)
         _remove_from_proc_queue!(tr, msg.testprocess_id, msg.testitem_id)
 
         push!(tr.reported_items, msg.testitem_id)
-        c.callbacks.on_testitem_passed(msg.testrun_id, msg.testitem_id, test_env_id, msg.duration)
+        _notify_testitem_passed(c.callbacks, msg.testrun_id, msg.testitem_id, test_env_id, msg.duration)
 
         if msg.coverage !== nothing
             append!(tr.coverage, map(i -> CoverageTools.FileCoverage(uri2filepath(i.uri), "", i.coverage), msg.coverage))
@@ -827,7 +827,7 @@ function handle!(c::TestItemController, msg::TestItemFailedMsg)
         _remove_from_proc_queue!(tr, msg.testprocess_id, msg.testitem_id)
 
         push!(tr.reported_items, msg.testitem_id)
-        c.callbacks.on_testitem_failed(
+        _notify_testitem_failed(c.callbacks,
             msg.testrun_id,
             msg.testitem_id,
             test_env_id,
@@ -893,7 +893,7 @@ function handle!(c::TestItemController, msg::TestItemErroredMsg)
         _remove_from_proc_queue!(tr, msg.testprocess_id, msg.testitem_id)
 
         push!(tr.reported_items, msg.testitem_id)
-        c.callbacks.on_testitem_errored(
+        _notify_testitem_errored(c.callbacks,
             msg.testrun_id,
             msg.testitem_id,
             test_env_id,
@@ -1029,7 +1029,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
             if haskey(tr.remaining_work, work_key) && item !== nothing
                 delete!(tr.remaining_work, work_key)
                 push!(tr.reported_items, testitem_id)
-                c.callbacks.on_testitem_errored(
+                _notify_testitem_errored(c.callbacks,
                     msg.testrun_id,
                     testitem_id,
                     test_env_id,
@@ -1060,7 +1060,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
             if haskey(tr.remaining_work, work_key)
                 delete!(tr.remaining_work, work_key)
                 push!(tr.reported_items, testitem_id)
-                c.callbacks.on_testitem_skipped(msg.testrun_id, testitem_id, test_env_id)
+                _notify_testitem_skipped(c.callbacks, msg.testrun_id, testitem_id, test_env_id)
             end
         end
         _check_testrun_complete!(c, tr)
@@ -1090,7 +1090,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
             "Test process crashed while running test item '$(item.label)'"
         end
         push!(tr.reported_items, crashed_item_id)
-        c.callbacks.on_testitem_errored(
+        _notify_testitem_errored(c.callbacks,
             msg.testrun_id,
             crashed_item_id,
             test_env_id,
@@ -1121,7 +1121,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
                 if haskey(tr.remaining_work, work_key) && item !== nothing
                     delete!(tr.remaining_work, work_key)
                     push!(tr.reported_items, testitem_id)
-                    c.callbacks.on_testitem_errored(
+                    _notify_testitem_errored(c.callbacks,
                         msg.testrun_id,
                         testitem_id,
                         test_env_id,
@@ -1152,7 +1152,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
                 if haskey(tr.remaining_work, work_key) && item !== nothing
                     delete!(tr.remaining_work, work_key)
                     push!(tr.reported_items, testitem_id)
-                    c.callbacks.on_testitem_errored(
+                    _notify_testitem_errored(c.callbacks,
                         msg.testrun_id,
                         testitem_id,
                         test_env_id,
@@ -1308,7 +1308,7 @@ function handle!(c::TestItemController, msg::TestItemTimeoutMsg)
         _remove_from_proc_queue!(tr, msg.testprocess_id, msg.testitem_id)
 
         push!(tr.reported_items, msg.testitem_id)
-        c.callbacks.on_testitem_errored(
+        _notify_testitem_errored(c.callbacks,
             msg.testrun_id,
             msg.testitem_id,
             test_env_id,
@@ -1537,7 +1537,7 @@ function handle!(c::TestItemController, msg::ActivationFailedMsg)
             if haskey(tr.remaining_work, work_key) && item !== nothing
                 delete!(tr.remaining_work, work_key)
                 push!(tr.reported_items, testitem_id)
-                c.callbacks.on_testitem_errored(
+                _notify_testitem_errored(c.callbacks,
                     testrun_id,
                     testitem_id,
                     test_env_id,
@@ -1579,7 +1579,7 @@ function handle!(c::TestItemController, msg::ActivationFailedMsg)
                 if haskey(tr.remaining_work, work_key) && item !== nothing
                     delete!(tr.remaining_work, work_key)
                     push!(tr.reported_items, testitem_id)
-                    c.callbacks.on_testitem_errored(
+                    _notify_testitem_errored(c.callbacks,
                         testrun_id,
                         testitem_id,
                         test_env_id,
