@@ -47,6 +47,7 @@ include("state.jl")
 
 include("testprocess.jl")
 include("testitemcontroller.jl")
+include("scheduling.jl")
 include("jsonrpctestitemcontroller.jl")
 
 include("precompile.jl")
