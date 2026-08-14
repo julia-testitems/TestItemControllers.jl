@@ -103,6 +103,11 @@ mutable struct TestRunState
     cancellation_source::CancellationTokens.CancellationTokenSource
     completion_channel::Channel{Any}    # reactor puts result here; execute_testrun waits on it
     reported_items::Set{String}         # testitem_ids for which a terminal callback was emitted
+    # Worker lifecycle policy for this run, sent on to each process in ConfigureTestRun.
+    # `gc_between_testitems` is resolved from the caller's request in `execute_testrun`
+    # (default: on whenever the run uses more than one process).
+    gc_between_testitems::Bool
+    memory_threshold::Union{Nothing,Float64}
 end
 
 function TestRunState(
@@ -114,6 +119,8 @@ function TestRunState(
     max_processes::Int;
     coverage_root_uris::Union{Nothing,Vector{String}}=nothing,
     token::Union{Nothing,CancellationTokens.CancellationToken}=nothing,
+    gc_between_testitems::Bool=false,
+    memory_threshold::Union{Nothing,Float64}=nothing,
 )
     cancellation_source = token === nothing ?
         CancellationTokens.CancellationTokenSource() :
@@ -140,6 +147,8 @@ function TestRunState(
         cancellation_source,
         Channel{Any}(1),                            # completion_channel
         Set{String}(),                              # reported_items
+        gc_between_testitems,
+        memory_threshold,
     )
 end
 

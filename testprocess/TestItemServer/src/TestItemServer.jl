@@ -11,6 +11,12 @@ import Logging
 include("../../../shared/testserver_protocol.jl")
 include("helper.jl")
 include("scratch_env.jl")
+include("watchdog.jl")
+
+# Exit code the test process uses when it stops itself between test items because system
+# memory crossed `memoryThreshold`. The controller recognises it and redistributes the
+# process's un-started items instead of reporting a crash — see `_handle_termination_during_run!`.
+const MEMORY_RECYCLE_EXIT_CODE = 66
 
 mutable struct Testsetup
     name::String
@@ -36,6 +42,13 @@ mutable struct TestProcessState
     coverage_root_uris::Union{Nothing,Vector{String}}
     log_level::Base.CoreLogging.LogLevel
 
+    # Run a full `GC.gc()` after every test item. Defaulted by the controller, which turns
+    # it on whenever a run has more than one test process.
+    gc_between_testitems::Bool
+    # Fraction of system memory (0..1) above which we stop after the current item so the
+    # controller can recycle us. `nothing` disables the check.
+    memory_threshold::Union{Nothing,Float64}
+
     testitems_channel::Channel{Vector{TestItemServerProtocol.RunTestItem}}
     stolen_testitem_ids_channel::Channel{Vector{String}}
     wakeup_channel::Channel{Nothing}
@@ -47,6 +60,8 @@ mutable struct TestProcessState
             "",
             nothing,
             Logging.Info,
+            false,
+            nothing,
             Channel{Vector{TestItemServerProtocol.RunTestItem}}(Inf),
             Channel{Vector{String}}(Inf),
             Channel{Nothing}(Inf)
@@ -1036,6 +1051,8 @@ function configure_test_run_request(params::TestItemServerProtocol.ConfigureTest
     state.mode = params.mode
     state.log_level = parse_log_level(Symbol(params.logLevel))
     state.coverage_root_uris = coalesce(params.coverageRootUris, nothing)
+    state.gc_between_testitems = coalesce(params.gcBetweenTestitems, false)
+    state.memory_threshold = coalesce(params.memoryThreshold, nothing)
 
     setups_to_remove = setdiff(keys(state.test_setups), map(i->(i.packageUri,Symbol(i.name)), params.testSetups))
     for i in setups_to_remove
@@ -1098,6 +1115,20 @@ JSONRPC.@message_dispatcher dispatch_msg begin
     TestItemServerProtocol.testserver_shutdown_request_type => shutdown_request
 end
 
+# Fraction of system memory currently in use, or `nothing` when the OS numbers are not
+# available. Deliberately a whole-system figure rather than this process's RSS: what makes
+# recycling worth doing is total pressure on the machine, and several test processes share it.
+function _memory_over_threshold(threshold::Union{Nothing,Float64})
+    threshold === nothing && return false
+    return try
+        total = Sys.total_memory()
+        total == 0 && return false
+        (1 - Sys.free_memory() / total) > threshold
+    catch err
+        false
+    end
+end
+
 function runner_loop(state::TestProcessState)
     stolen_testitem_ids = String[]
     testitems = TestItemServerProtocol.RunTestItem[]
@@ -1152,7 +1183,12 @@ function runner_loop(state::TestProcessState)
 
                 print(stderr, "\x1f3805a0ad41b54562a46add40be31ca27", "$(current_testitem.id)\"", "")
                 flush(stderr)
-                ret = run_testitem(state.endpoint, current_testitem, state.mode, state.coverage_root_uris, state)
+                arm_watchdog!(current_testitem.id, current_testitem.timeoutMs)
+                ret = try
+                    run_testitem(state.endpoint, current_testitem, state.mode, state.coverage_root_uris, state)
+                finally
+                    disarm_watchdog!()
+                end
                 print(stderr, "\x1f4031af828c3d406ca42e25628bb0aa77")
                 flush(stderr)
 
@@ -1166,6 +1202,19 @@ function runner_loop(state::TestProcessState)
                     ret[1],
                     ret[2]
                 )
+
+                # Both of these run *after* the result has been reported, so an item is
+                # never charged for the collection and a recycle can never lose a result.
+                if state.gc_between_testitems
+                    GC.gc(true)
+                end
+
+                if _memory_over_threshold(state.memory_threshold)
+                    @info "Stopping this test process: system memory use is above the configured threshold of $(state.memory_threshold). The controller will redistribute the remaining test items."
+                    flush(stderr)
+                    flush(stdout)
+                    exit(MEMORY_RECYCLE_EXIT_CODE)
+                end
             end
         end
 
@@ -1183,6 +1232,10 @@ function runner_loop(state::TestProcessState)
 end
 
 function serve(pipename, debug_pipename, error_handler=nothing)
+    # Started before anything else touches the load path: `Profile` has to be resolved
+    # while `@stdlib` is still reachable, i.e. before the first `activate_env_request`.
+    start_watchdog!()
+
     if debug_pipename!==nothing
         start_debug_backend(debug_pipename, error_handler)
     end

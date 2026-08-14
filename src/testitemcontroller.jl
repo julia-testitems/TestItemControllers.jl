@@ -398,40 +398,11 @@ function handle!(c::TestItemController, msg::GetProcsForTestRunMsg)
             @debug "Checking whether test environment precompilation is needed"
             coverage_arg = k.mode == "Coverage" ? "--code-coverage=user" : "--code-coverage=none"
 
-            jlEnv = copy(ENV)
+            jlEnv = _subprocess_env(k)
 
-            # During precompilation, Julia restricts JULIA_LOAD_PATH to dependency paths only
-            # (no "@" entry), which prevents child processes from using their own active project.
-            if ccall(:jl_generating_output, Cint, ()) == 1
-                delete!(jlEnv, "JULIA_LOAD_PATH")
-            end
+            julia_version = _resolve_julia_version(c, k)
 
-            for (ek, ev) in pairs(k.env)
-                if ev !== nothing
-                    jlEnv[ek] = ev
-                elseif haskey(jlEnv, ek)
-                    delete!(jlEnv, ek)
-                end
-            end
-
-            # The subprocess exists only to detect Julia <= 1.10 for the
-            # precompile hack below. When the test processes use exactly the
-            # binary this process is running, the answer is already known —
-            # skip the ~0.3-0.5s `julia --version` launch. (A bare "julia"
-            # must still be probed: PATH or a juliaup channel can resolve it
-            # to a different version than the running process.)
-            julia_version = if isempty(k.juliaArgs) &&
-                    k.juliaCmd == joinpath(Sys.BINDIR, Base.julia_exename())
-                VERSION
-            else
-                get!(c.julia_version_cache, (k.juliaCmd, k.juliaArgs)) do
-                    julia_version_as_string = read(Cmd(`$(k.juliaCmd) $(k.juliaArgs) --version`, detach=false, env=jlEnv), String)
-                    julia_version_as_string = julia_version_as_string[length("julia version")+2:end]
-                    VersionNumber(julia_version_as_string)
-                end
-            end
-
-            if julia_version <= v"1.10.0"
+            if julia_version !== nothing && julia_version <= v"1.10.0"
                 testserver_precompile_script = joinpath(@__DIR__, "../testprocess/app/testserver_precompile.jl")
 
                 # "auto" is Julia's default and rejected as a flag value before 1.8 — only
@@ -699,7 +670,10 @@ function handle!(c::TestItemController, msg::TestItemStartedMsg)
         timeout = wu !== nothing ? wu.timeout : nothing
 
         if timeout !== nothing
-            ps.timeout_cs = CancellationTokens.CancellationTokenSource(timeout)
+            # The test process's watchdog fires at the item's real deadline; we wait a grace
+            # period beyond it so its diagnostic dump is on disk before we kill the process.
+            # The item is still reported as having timed out after `timeout` seconds.
+            ps.timeout_cs = CancellationTokens.CancellationTokenSource(timeout + WATCHDOG_KILL_GRACE_SECONDS)
             ps.timeout_reg = CancellationTokens.register(CancellationTokens.get_token(ps.timeout_cs)) do
                 try
                     put!(c.reactor_channel, TestItemTimeoutMsg(msg.testrun_id, msg.testprocess_id, msg.testitem_id))
@@ -1161,6 +1135,16 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
     ps = haskey(c.test_processes, terminated_proc_id) ? c.test_processes[terminated_proc_id] : nothing
     crashed_item_id = ps !== nothing ? ps.current_testitem_id : nothing
 
+    # A memory recycle is a clean, deliberate exit taken *between* items, after the last
+    # result was reported — so there is no in-flight item to blame, and the remaining items
+    # go through the ordinary redistribute-or-respawn path below rather than being errored.
+    recycled = ps !== nothing && ps.last_exit_code == MEMORY_RECYCLE_EXIT_CODE
+    if recycled
+        @info "Test process '$(terminated_proc_id)' stopped itself to release memory, redistributing $(length(items_to_redistribute)) remaining item(s)"
+        _cancel_timeout!(ps)
+        crashed_item_id = nothing
+    end
+
     crashed_work_key = crashed_item_id !== nothing ? (crashed_item_id, test_env_id) : nothing
     if crashed_item_id !== nothing && haskey(tr.remaining_work, crashed_work_key)
         # A test item was actively running when the process crashed — error it immediately.
@@ -1386,6 +1370,15 @@ function handle!(c::TestItemController, msg::TestItemTimeoutMsg)
     timeout_val = wu !== nothing && wu.timeout !== nothing ? wu.timeout : "?"
 
     @warn "Test item '$(item_label)' timed out after $(timeout_val) seconds"
+
+    # Attach whatever the test process's watchdog managed to dump before we report the item
+    # as errored, so the backtrace shows up as that item's output. The dump is absent when
+    # the item wedged without ever reaching a GC safepoint, or when the process has no spare
+    # thread to run the watchdog on — both degrade to today's behaviour.
+    diagnostics = _read_diagnostics(msg.testprocess_id)
+    if diagnostics !== nothing
+        c.callbacks.on_append_output(msg.testrun_id, msg.testitem_id, test_env_id, replace(diagnostics, "\n"=>"\r\n"))
+    end
 
     _cancel_timeout!(ps)
 
@@ -1749,6 +1742,56 @@ end
 # Process management helpers
 # ═══════════════════════════════════════════════════════════════════════════════
 
+# Build the environment a subprocess for `penv` runs in, applying the test environment's
+# overlay (a `nothing` value deletes the variable) on top of ours.
+function _subprocess_env(penv::ProcessEnv)
+    jlEnv = copy(ENV)
+
+    # During precompilation, Julia restricts JULIA_LOAD_PATH to dependency paths only
+    # (no "@" entry), which prevents child processes from using their own active project.
+    if ccall(:jl_generating_output, Cint, ()) == 1
+        delete!(jlEnv, "JULIA_LOAD_PATH")
+    end
+
+    for (ek, ev) in pairs(penv.env)
+        if ev !== nothing
+            jlEnv[ek] = ev
+        elseif haskey(jlEnv, ek)
+            delete!(jlEnv, ek)
+        end
+    end
+
+    return jlEnv
+end
+
+# The Julia version a test process for `penv` will run. Two callers need it: the pre-1.10
+# precompile hack, and the launch, which may only pass `--threads=N,M` to Julia >= 1.9.
+#
+# Probing costs a process launch, so the answer is cached per (cmd, args) and the common
+# case — the exact binary this controller runs, with no extra args — short-circuits. (A bare
+# "julia" must still be probed: PATH or a juliaup channel can resolve it to a different
+# version than the running process.) Returns `nothing` when the probe fails, which every
+# caller treats as "assume nothing".
+function _resolve_julia_version(c::TestItemController, penv::ProcessEnv)
+    if isempty(penv.juliaArgs) && penv.juliaCmd == joinpath(Sys.BINDIR, Base.julia_exename())
+        return VERSION
+    end
+
+    key = (penv.juliaCmd, penv.juliaArgs)
+    haskey(c.julia_version_cache, key) && return c.julia_version_cache[key]
+
+    version = try
+        version_as_string = read(Cmd(`$(penv.juliaCmd) $(penv.juliaArgs) --version`, detach=false, env=_subprocess_env(penv)), String)
+        VersionNumber(version_as_string[length("julia version")+2:end])
+    catch err
+        @warn "Could not determine the Julia version of '$(penv.juliaCmd)'" exception=(err, catch_backtrace())
+        nothing
+    end
+
+    version !== nothing && (c.julia_version_cache[key] = version)
+    return version
+end
+
 # Map common POSIX signal numbers to human-readable names.
 const _SIGNAL_NAMES = Dict{Int,String}(
     1  => "SIGHUP",
@@ -1934,10 +1977,14 @@ function _launch_julia_process!(c::TestItemController, ps::TestProcessState)
     @debug "Launching Julia process for test process" testprocess_id=ps.id package=ps.env.package_name mode=ps.env.mode is_precompile=ps.is_precompile_process precompile_done=ps.precompile_done testrun_id=something(ps.testrun_id, "none")
     put!(c.reactor_channel, TestProcessStatusChangedMsg(ps.id, "Launching"))
 
+    # Resolved here rather than in `start` so the (possibly probing) lookup stays on the
+    # reactor, where it is serialized and cached, instead of racing across IO tasks.
+    julia_version = _resolve_julia_version(c, ps.env)
+
     t = @async try
         start(ps.id, c.reactor_channel, ps, ps.env, ps.debug_pipe_name,
               c.error_handler_file, c.crash_reporting_pipename,
-              launch_token)
+              julia_version, launch_token)
     catch err
         @error "Error in test process IO" testprocess_id=ps.id exception=(err, catch_backtrace())
     end
@@ -1992,6 +2039,12 @@ function _configure_testrun!(c::TestItemController, ps::TestProcessState)
         try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal)) catch end
         return
     end
+    # Read off the reactor, before the async send: `ps.testrun_id` may be cleared by the
+    # time the task runs.
+    tr = ps.testrun_id !== nothing ? get(c.test_runs, ps.testrun_id, nothing) : nothing
+    gc_between_testitems = tr !== nothing ? tr.gc_between_testitems : false
+    memory_threshold = tr !== nothing ? tr.memory_threshold : nothing
+
     @async try
         if ps.endpoint === nothing || !isopen(ps.endpoint)
             @debug "Configuration cancelled: endpoint gone before send" testprocess_id=ps.id
@@ -2004,7 +2057,9 @@ function _configure_testrun!(c::TestItemController, ps::TestProcessState)
                 mode = ps.env.mode,
                 logLevel = string(ps.proc_log_level),
                 coverageRootUris = something(ps.coverage_root_uris, missing),
-                testSetups = ps.test_setups
+                testSetups = ps.test_setups,
+                gcBetweenTestitems = gc_between_testitems,
+                memoryThreshold = something(memory_threshold, missing)
             )
         )
         put!(c.reactor_channel, TestProcessTestSetupsLoadedMsg(ps.id))
@@ -2031,6 +2086,19 @@ function _send_run_testitems!(c::TestItemController, ps::TestProcessState, items
         return
     end
     put!(c.reactor_channel, TestProcessStatusChangedMsg(ps.id, "Running"))
+
+    # Resolved on the reactor, where the run state is safe to read. The test process arms
+    # its hang watchdog from this; the controller's own timeout stays the backstop.
+    tr = ps.testrun_id !== nothing ? get(c.test_runs, ps.testrun_id, nothing) : nothing
+    test_env_id = tr !== nothing ? _resolve_test_env_id(tr, ps.env) : nothing
+    timeouts_ms = Dict{String,Union{Missing,Float64}}()
+    if tr !== nothing
+        for i in items
+            wu = get(tr.remaining_work, (i.id, test_env_id), nothing)
+            timeouts_ms[i.id] = wu !== nothing && wu.timeout !== nothing ? wu.timeout * 1000 : missing
+        end
+    end
+
     @async try
         if ps.endpoint === nothing || !isopen(ps.endpoint)
             @debug "Run cancelled: endpoint gone before send" testprocess_id=ps.id
@@ -2055,6 +2123,7 @@ function _send_run_testitems!(c::TestItemController, ps::TestProcessState, items
                         column = i.code_column,
                         code = i.code,
                         skip = _skip_source(i.option_skip),
+                        timeoutMs = get(timeouts_ms, i.id, missing),
                     ) for i in items
                 ],
             )
@@ -2379,7 +2448,9 @@ function execute_testrun(
     test_setups::Vector{TestSetupDetail},
     max_processes::Int,
     token;
-    coverage_root_uris::Union{Nothing,Vector{String}}=nothing)
+    coverage_root_uris::Union{Nothing,Vector{String}}=nothing,
+    gc_between_testitems::Union{Nothing,Bool}=nothing,
+    memory_threshold::Union{Nothing,Float64}=nothing)
 
     @info "Creating new test run '$(testrun_id)' with $(length(test_items)) test item(s) and $(length(test_environments)) environment(s)"
 
@@ -2395,7 +2466,8 @@ function execute_testrun(
         ],
         max_processes;
         coverage_root_uris = coverage_root_uris,
-        token = token
+        token = token,
+        memory_threshold = memory_threshold
     )
 
     # Register cancellation bridge
@@ -2435,6 +2507,13 @@ function execute_testrun(
         n_procs = max(1, min(floor(Int, max_processes * as_share), length(test_items)))
         proc_count_by_env[k] = n_procs
     end
+
+    # Collecting between items only pays for itself when memory is contended, which in
+    # practice means more than one test process — so that is the default, matching
+    # ReTestItems' `gc_between_testitems`.
+    tr.gc_between_testitems = gc_between_testitems === nothing ?
+        sum(values(proc_count_by_env), init=0) > 1 :
+        gc_between_testitems
 
     # Resolve log_level from the first work unit
     log_level = !isempty(work_units) ? first(work_units).log_level : :Info
