@@ -12,21 +12,21 @@ JSONRPC.@message_dispatcher dispatch_testprocess_msg begin
         reactor_channel, ps = ctx
         testrun_id = ps.testrun_id
         if testrun_id !== nothing
-            put!(reactor_channel, TestItemPassedMsg(testrun_id, ps.id, params.testItemId, params.duration, coalesce(params.coverage, nothing)))
+            put!(reactor_channel, TestItemPassedMsg(testrun_id, ps.id, params.testItemId, params.duration, coalesce(params.coverage, nothing), _convert_perf_stats(params.perf)))
         end
     end
     TestItemServerProtocol.failed_notification_type => (params, ctx) -> begin
         reactor_channel, ps = ctx
         testrun_id = ps.testrun_id
         if testrun_id !== nothing
-            put!(reactor_channel, TestItemFailedMsg(testrun_id, ps.id, params.testItemId, params.messages, coalesce(params.duration, nothing)))
+            put!(reactor_channel, TestItemFailedMsg(testrun_id, ps.id, params.testItemId, params.messages, coalesce(params.duration, nothing), _convert_perf_stats(params.perf)))
         end
     end
     TestItemServerProtocol.errored_notification_type => (params, ctx) -> begin
         reactor_channel, ps = ctx
         testrun_id = ps.testrun_id
         if testrun_id !== nothing
-            put!(reactor_channel, TestItemErroredMsg(testrun_id, ps.id, params.testItemId, params.messages, coalesce(params.duration, nothing)))
+            put!(reactor_channel, TestItemErroredMsg(testrun_id, ps.id, params.testItemId, params.messages, coalesce(params.duration, nothing), _convert_perf_stats(params.perf)))
         end
     end
     TestItemServerProtocol.skipped_stolen_notification_type => (params, ctx) -> begin
@@ -36,6 +36,29 @@ JSONRPC.@message_dispatcher dispatch_testprocess_msg begin
             put!(reactor_channel, TestItemSkippedStolenMsg(testrun_id, ps.id, params.testItemId))
         end
     end
+    TestItemServerProtocol.skipped_notification_type => (params, ctx) -> begin
+        reactor_channel, ps = ctx
+        testrun_id = ps.testrun_id
+        if testrun_id !== nothing
+            put!(reactor_channel, TestItemSkippedMsg(testrun_id, ps.id, params.testItemId, coalesce(params.reason, nothing)))
+        end
+    end
+    TestItemServerProtocol.setup_evaluated_notification_type => (params, ctx) -> begin
+        reactor_channel, ps = ctx
+        put!(reactor_channel, TestSetupEvaluatedMsg(ps.id, params.packageUri, params.name, coalesce(params.durationMs, nothing), coalesce(params.output, "")))
+    end
+end
+
+function _convert_perf_stats(perf::Union{Missing,TestItemServerProtocol.PerfStatsParams})
+    perf === missing && return nothing
+    return PerfStats(
+        coalesce(perf.elapsed, nothing),
+        coalesce(perf.bytes, nothing),
+        coalesce(perf.allocs, nothing),
+        coalesce(perf.gctime, nothing),
+        coalesce(perf.compile_time, nothing),
+        coalesce(perf.recompile_time, nothing),
+    )
 end
 
 function _truncate_for_log(s::AbstractString; max_bytes::Int=8192)

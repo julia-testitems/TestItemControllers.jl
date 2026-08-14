@@ -761,7 +761,7 @@ function handle!(c::TestItemController, msg::TestItemPassedMsg)
         _remove_from_proc_queue!(tr, msg.testprocess_id, msg.testitem_id)
 
         push!(tr.reported_items, msg.testitem_id)
-        _notify_testitem_passed(c.callbacks, msg.testrun_id, msg.testitem_id, test_env_id, msg.duration)
+        _notify_testitem_passed(c.callbacks, msg.testrun_id, msg.testitem_id, test_env_id, msg.duration, msg.perf)
 
         if msg.coverage !== nothing
             append!(tr.coverage, map(i -> CoverageTools.FileCoverage(uri2filepath(i.uri), "", i.coverage), msg.coverage))
@@ -842,7 +842,8 @@ function handle!(c::TestItemController, msg::TestItemFailedMsg)
                     _convert_stack_trace(i.stackTrace),
                 ) for i in msg.messages
             ],
-            msg.duration
+            msg.duration,
+            msg.perf
         )
     else
         _log_unexpected_missing_work(tr, msg.testitem_id, msg.testprocess_id, test_env_id, "failed")
@@ -908,7 +909,8 @@ function handle!(c::TestItemController, msg::TestItemErroredMsg)
                     _convert_stack_trace(i.stackTrace),
                 ) for i in msg.messages
             ],
-            msg.duration
+            msg.duration,
+            msg.perf
         )
     else
         _log_unexpected_missing_work(tr, msg.testitem_id, msg.testprocess_id, test_env_id, "errored")
@@ -944,6 +946,72 @@ function handle!(c::TestItemController, msg::TestItemSkippedStolenMsg)
 
     _check_stealing!(c, tr, msg.testprocess_id)
     _check_testrun_complete!(c, tr)
+    return false
+end
+
+function handle!(c::TestItemController, msg::TestItemSkippedMsg)
+    if !haskey(c.test_runs, msg.testrun_id)
+        return false
+    end
+    tr = c.test_runs[msg.testrun_id]
+    if state(tr.fsm) in (TestRunCancelled, TestRunCompleted)
+        return false
+    end
+
+    # Cancel timeout
+    if haskey(c.test_processes, msg.testprocess_id)
+        _cancel_timeout!(c.test_processes[msg.testprocess_id])
+    end
+
+    # Handle stolen tracking
+    stolen_idx = findfirst(isequal(msg.testitem_id), get(tr.stolen_ids_by_proc, msg.testprocess_id, String[]))
+    if stolen_idx !== nothing
+        deleteat!(tr.stolen_ids_by_proc[msg.testprocess_id], stolen_idx)
+    end
+
+    # Discard the result if another process owns this item — see `_owns_testitem`.
+    if !_owns_testitem(tr, msg.testprocess_id, msg.testitem_id)
+        _log_discarded_result(msg.testitem_id, msg.testprocess_id, "skipped")
+        _check_stealing!(c, tr, msg.testprocess_id)
+        _check_testrun_complete!(c, tr)
+        return false
+    end
+
+    # Resolve test_env_id
+    test_env_id = if haskey(c.test_processes, msg.testprocess_id)
+        _resolve_test_env_id(tr, c.test_processes[msg.testprocess_id].env)
+    else
+        first(tr.test_environments).id
+    end
+
+    work_key = (msg.testitem_id, test_env_id)
+    if haskey(tr.remaining_work, work_key)
+        delete!(tr.remaining_work, work_key)
+        _remove_from_proc_queue!(tr, msg.testprocess_id, msg.testitem_id)
+
+        push!(tr.reported_items, msg.testitem_id)
+        _notify_testitem_skipped(c.callbacks, msg.testrun_id, msg.testitem_id, test_env_id, msg.reason)
+    else
+        _log_unexpected_missing_work(tr, msg.testitem_id, msg.testprocess_id, test_env_id, "skipped")
+        _remove_from_proc_queue!(tr, msg.testprocess_id, msg.testitem_id)
+    end
+
+    _check_stealing!(c, tr, msg.testprocess_id)
+    _check_testrun_complete!(c, tr)
+    return false
+end
+
+# Records what a setup cost and printed on this process. The test process replays the output
+# onto every item that declares the setup itself; what the controller keeps this for is the
+# cost model, and it therefore survives for as long as the process caches the setup.
+function handle!(c::TestItemController, msg::TestSetupEvaluatedMsg)
+    ps = get(c.test_processes, msg.testprocess_id, nothing)
+    if ps === nothing
+        return false
+    end
+
+    ps.loaded_setups[(msg.package_uri, msg.name)] = (output=msg.output, duration=msg.duration)
+
     return false
 end
 
@@ -1931,6 +1999,12 @@ function _configure_testrun!(c::TestItemController, ps::TestProcessState)
     end
 end
 
+# The wire format carries the `skip` kwarg as source text, because the test process is what
+# evaluates it. A literal is sent as `"true"`/`"false"` rather than being resolved here, so
+# the test process has a reason string to report either way; `false` is left off entirely.
+_skip_source(option_skip::Bool) = option_skip ? "true" : missing
+_skip_source(option_skip::AbstractString) = String(option_skip)
+
 function _send_run_testitems!(c::TestItemController, ps::TestProcessState, items)
     if ps.endpoint === nothing || !isopen(ps.endpoint)
         @warn "Cannot send test items: process has no endpoint" testprocess_id=ps.id
@@ -1961,6 +2035,7 @@ function _send_run_testitems!(c::TestItemController, ps::TestProcessState, items
                         line = i.code_line,
                         column = i.code_column,
                         code = i.code,
+                        skip = _skip_source(i.option_skip),
                     ) for i in items
                 ],
             )

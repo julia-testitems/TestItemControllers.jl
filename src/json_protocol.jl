@@ -38,6 +38,9 @@ end
     code::String
     codeLine::Int
     codeColumn::Int
+    # The `skip` kwarg: `true`/`false` for a literal, or the source text of an expression the
+    # *test process* evaluates immediately before the item would run. Absent means `false`.
+    optionSkip::Union{Missing,Bool,String}
 end
 
 @dict_readable struct TestSetupDetail <: JSONRPC.Outbound
@@ -105,11 +108,23 @@ end
 
 const notficiationTypeTestItemStarted = NotificationType("testItemStarted", TestItemStartedParams)
 
+# Execution statistics for one test item. Every field is optional: the compile timings in
+# particular rely on Julia internals that not every version the test process supports has.
+@dict_readable struct PerfStatsParams <: Outbound
+    elapsed::Union{Missing,Float64}         # milliseconds
+    bytes::Union{Missing,Int}
+    allocs::Union{Missing,Int}
+    gctime::Union{Missing,Float64}          # milliseconds
+    compileTime::Union{Missing,Float64}     # milliseconds
+    recompileTime::Union{Missing,Float64}   # milliseconds
+end
+
 @dict_readable struct TestItemErroredParams <: Outbound
     testRunId::String
     testItemId::String
     messages::Vector{TestMessage}
     duration::Union{Missing,Float64}
+    perf::Union{Missing,PerfStatsParams}
 end
 const notficiationTypeTestItemErrored = NotificationType("testItemErrored", TestItemErroredParams)
 
@@ -118,6 +133,7 @@ const notficiationTypeTestItemErrored = NotificationType("testItemErrored", Test
     testItemId::String
     messages::Vector{TestMessage}
     duration::Union{Missing,Float64}
+    perf::Union{Missing,PerfStatsParams}
 end
 const notficiationTypeTestItemFailed = NotificationType("testItemFailed", TestItemFailedParams)
 
@@ -125,10 +141,19 @@ const notficiationTypeTestItemFailed = NotificationType("testItemFailed", TestIt
     testRunId::String
     testItemId::String
     duration::Union{Missing,Float64}
+    perf::Union{Missing,PerfStatsParams}
 end
 
 const notficiationTypeTestItemPassed = NotificationType("testItemPassed", TestItemPassedParams)
-const notficiationTypeTestItemSkipped = NotificationType("testItemSkipped", @NamedTuple{testRunId::String,testItemId::String})
+
+@dict_readable struct TestItemSkippedParams <: Outbound
+    testRunId::String
+    testItemId::String
+    # Source text of the `skip` expression that evaluated to `true`, when there was one.
+    reason::Union{Missing,String}
+end
+
+const notficiationTypeTestItemSkipped = NotificationType("testItemSkipped", TestItemSkippedParams)
 
 @dict_readable struct AppendOutputParams <: Outbound
     testRunId::String

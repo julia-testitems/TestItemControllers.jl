@@ -24,6 +24,18 @@ function _to_wire_messages(messages::Vector{TestMessage})
     ]
 end
 
+function _to_wire_perf(perf::Union{Nothing,PerfStats})
+    perf === nothing && return missing
+    return TestItemControllerProtocol.PerfStatsParams(
+        elapsed = something(perf.elapsed, missing),
+        bytes = something(perf.bytes, missing),
+        allocs = something(perf.allocs, missing),
+        gctime = something(perf.gctime, missing),
+        compileTime = something(perf.compile_time, missing),
+        recompileTime = something(perf.recompile_time, missing),
+    )
+end
+
 function _to_wire_coverage(coverage::Vector{FileCoverage})
     return TestItemControllerProtocol.FileCoverage[
         TestItemControllerProtocol.FileCoverage(
@@ -89,35 +101,42 @@ mutable struct JSONRPCTestItemController
                     testItemId=testitem_id
                 )
             ),
-            on_testitem_passed = (testrun_id, testitem_id, test_env_id, duration) -> _safe_send(
+            on_testitem_passed = (testrun_id, testitem_id, test_env_id, duration, perf=nothing) -> _safe_send(
                 TestItemControllerProtocol.notficiationTypeTestItemPassed,
                 TestItemControllerProtocol.TestItemPassedParams(
                     testRunId=testrun_id,
                     testItemId=testitem_id,
-                    duration=duration
+                    duration=duration,
+                    perf=_to_wire_perf(perf)
                 )
             ),
-            on_testitem_failed = (testrun_id, testitem_id, test_env_id, messages, duration) -> _safe_send(
+            on_testitem_failed = (testrun_id, testitem_id, test_env_id, messages, duration, perf=nothing) -> _safe_send(
                 TestItemControllerProtocol.notficiationTypeTestItemFailed,
                 TestItemControllerProtocol.TestItemFailedParams(
                     testRunId=testrun_id,
                     testItemId=testitem_id,
                     messages=_to_wire_messages(messages),
-                    duration=something(duration, missing)
+                    duration=something(duration, missing),
+                    perf=_to_wire_perf(perf)
                 )
             ),
-            on_testitem_errored = (testrun_id, testitem_id, test_env_id, messages, duration) -> _safe_send(
+            on_testitem_errored = (testrun_id, testitem_id, test_env_id, messages, duration, perf=nothing) -> _safe_send(
                 TestItemControllerProtocol.notficiationTypeTestItemErrored,
                 TestItemControllerProtocol.TestItemErroredParams(
                     testRunId=testrun_id,
                     testItemId=testitem_id,
                     messages=_to_wire_messages(messages),
-                    duration=something(duration, missing)
+                    duration=something(duration, missing),
+                    perf=_to_wire_perf(perf)
                 )
             ),
-            on_testitem_skipped = (testrun_id, testitem_id, test_env_id) -> _safe_send(
+            on_testitem_skipped = (testrun_id, testitem_id, test_env_id, reason=nothing) -> _safe_send(
                 TestItemControllerProtocol.notficiationTypeTestItemSkipped,
-                (testRunId=testrun_id, testItemId=testitem_id)
+                TestItemControllerProtocol.TestItemSkippedParams(
+                    testRunId=testrun_id,
+                    testItemId=testitem_id,
+                    reason=something(reason, missing)
+                )
             ),
             on_append_output = (testrun_id, testitem_id, test_env_id, output) -> _safe_send(
                 TestItemControllerProtocol.notficiationTypeAppendOutput,
@@ -209,6 +228,7 @@ function create_testrun_request(params::TestItemControllerProtocol.CreateTestRun
             i.code,
             i.codeLine,
             i.codeColumn,
+            i.optionSkip === missing ? false : i.optionSkip,
         )
         for i in params.testItems
     ]

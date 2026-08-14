@@ -20,6 +20,12 @@ mutable struct Testsetup
     column::Int
     code::String
     evaled::Bool
+    # Output and wall time captured the one time this setup was evaluated on this process.
+    # The output is replayed onto every item that declares the setup — including items from
+    # later test runs handed to this pooled process — so which item happened to trigger the
+    # evaluation stops being observable. Both are reset when the setup's code changes.
+    captured_output::String
+    duration::Union{Nothing,Float64}
 end
 
 mutable struct TestProcessState
@@ -272,6 +278,139 @@ function process_coverage_data(coverage_results)
     return coverage_info
 end
 
+# Maximum amount of a setup's captured output that is replayed onto a dependent item. A
+# chatty setup would otherwise be multiplied by the number of items that declare it.
+const MAX_REPLAYED_SETUP_OUTPUT = 32 * 1024
+
+function truncate_setup_output(s::AbstractString)
+    ncodeunits(s) <= MAX_REPLAYED_SETUP_OUTPUT && return String(s)
+    i = MAX_REPLAYED_SETUP_OUTPUT
+    while i > 0 && !Base.isvalid(s, i)
+        i -= 1
+    end
+    return string(SubString(s, 1, i), "\n… ($(ncodeunits(s) - i) bytes of setup output truncated)\n")
+end
+
+# Evaluate `f` with `stdout`/`stderr` captured into `out[]`, truncated. The redirection is
+# process-wide, which is only acceptable because it is used around setup evaluation, where
+# the runner loop is the only thing producing output. `out[]` is set even when `f` throws.
+function with_captured_output(f, out::Base.RefValue{String})
+    orig_stdout = stdout
+    orig_stderr = stderr
+
+    rd, wr = redirect_stdout()
+    redirect_stderr(wr)
+
+    reader = @async read(rd, String)
+
+    try
+        return f()
+    finally
+        redirect_stdout(orig_stdout)
+        redirect_stderr(orig_stderr)
+        close(wr)
+        out[] = try
+            truncate_setup_output(fetch(reader))
+        catch
+            ""
+        end
+        close(rd)
+    end
+end
+
+# Setup output is captured and replayed rather than shown live, so that every item declaring
+# the setup sees it and not just whichever item happened to trigger the single evaluation
+# (analysis A.3). The fence names the setup, which also explains why a sibling item shows the
+# same block.
+function replay_setup_output(name::AbstractString, kind::Symbol, text::AbstractString)
+    isempty(text) && return
+
+    macro_name = kind === :module ? "@testmodule" : "@testsnippet"
+
+    print(stderr, "\n── output from $macro_name $name (evaluated on this worker) ──\n")
+    print(stderr, text)
+    endswith(text, "\n") || print(stderr, "\n")
+    print(stderr, "── end output from $macro_name $name ──\n")
+    flush(stderr)
+
+    return nothing
+end
+
+# `Base.cumulative_compile_timing` and `Base.cumulative_compile_time_ns` are internals that
+# only exist from Julia 1.8 on, while the test process supports every version back to 1.0
+# (see `testprocess/environments/`). Everything below degrades to `missing` instead of
+# throwing, so a missing compile timing never turns into a spurious errored test item.
+const HAS_COMPILE_TIMING = isdefined(Base, :cumulative_compile_timing) && isdefined(Base, :cumulative_compile_time_ns)
+
+function start_compile_timing()
+    HAS_COMPILE_TIMING || return nothing
+    try
+        Base.cumulative_compile_timing(true)
+        before = Base.cumulative_compile_time_ns()
+        if !(before isa Tuple{Any,Any})
+            Base.cumulative_compile_timing(false)
+            return nothing
+        end
+        return before
+    catch err
+        return nothing
+    end
+end
+
+function stop_compile_timing(before)
+    before === nothing && return (missing, missing)
+    try
+        after = Base.cumulative_compile_time_ns()
+        Base.cumulative_compile_timing(false)
+        return ((after[1] - before[1]) / 1e6, (after[2] - before[2]) / 1e6)
+    catch err
+        try Base.cumulative_compile_timing(false) catch end
+        return (missing, missing)
+    end
+end
+
+function start_gc_timing()
+    try
+        return Base.gc_num()
+    catch err
+        return nothing
+    end
+end
+
+function collect_perf_stats(elapsed_ms, gc_before, compile_before)
+    compile_time, recompile_time = stop_compile_timing(compile_before)
+
+    bytes = missing
+    allocs = missing
+    gctime = missing
+
+    if gc_before !== nothing
+        try
+            diff = Base.GC_Diff(Base.gc_num(), gc_before)
+            bytes = Int(diff.allocd)
+            allocs = Int(Base.gc_alloc_count(diff))
+            gctime = diff.total_time / 1e6
+        catch err
+        end
+    end
+
+    return TestItemServerProtocol.PerfStatsParams(
+        elapsed = Float64(elapsed_ms),
+        bytes = bytes,
+        allocs = allocs,
+        gctime = gctime,
+        compile_time = compile_time,
+        recompile_time = recompile_time,
+    )
+end
+
+# JuliaSyntax treats parentheses as trivia, so the source range recorded for
+# `skip=(VERSION < v"1.11")` yields `VERSION < v"1.11"` with the parentheses gone. Splicing
+# that back bare would let it reassociate — `skip=a ? b : c` is the clearest case — so the
+# text is always re-parenthesized. The newlines mean a trailing line comment cannot swallow
+# the closing parenthesis.
+parenthesized_skip_code(skip::AbstractString) = string("(\n", skip, "\n)")
+
 # `testcode_module_parent` exists for the precompile workload: during package-image
 # generation `Main` is closed, so the throwaway module holding the test code must be
 # created inside the (still open) TestItemServer module instead.
@@ -288,6 +427,74 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
     cd(working_dir)
 
     coverage_results = CoverageTools.FileCoverage[] # This will hold the results of various coverage sprints
+
+    # `skip` is evaluated here — in the test process, before anything else is done for this
+    # item — because that is the only place that can answer `VERSION < v"1.11"` or
+    # `Sys.iswindows()` for the process the item would actually have run in. Evaluating it
+    # ahead of the setups also means a skipped item never pays for them.
+    if params.skip !== missing
+        skip_result = nothing
+        skip_error = nothing
+
+        try
+            skip_module = Core.eval(testcode_module_parent, :(module $(gensym()) end))
+            skip_result = Base.invokelatest(
+                include_string,
+                skip_module,
+                parenthesized_skip_code(params.skip),
+                uri2filepath(params.uri)
+            )
+        catch err
+            skip_error = (err, catch_backtrace())
+        end
+
+        if skip_error !== nothing
+            err, bt = skip_error
+
+            return (
+                TestItemServerProtocol.errored_notification_type,
+                TestItemServerProtocol.ErroredParams(
+                    testItemId = params.id,
+                    messages = [
+                        TestItemServerProtocol.TestMessage(
+                            message = "Error while evaluating the `skip` option: $(format_error_message(err, bt))",
+                            location = TestItemServerProtocol.Location(
+                                params.uri,
+                                TestItemServerProtocol.Position(params.line, 1)
+                            ),
+                            stackTrace = backtrace_to_stackframes(bt),
+                        )
+                    ],
+                    duration = missing
+                )
+            )
+        elseif skip_result === true
+            return (
+                TestItemServerProtocol.skipped_notification_type,
+                TestItemServerProtocol.SkippedParams(
+                    testItemId = params.id,
+                    reason = params.skip
+                )
+            )
+        elseif skip_result !== false
+            return (
+                TestItemServerProtocol.errored_notification_type,
+                TestItemServerProtocol.ErroredParams(
+                    testItemId = params.id,
+                    messages = [
+                        TestItemServerProtocol.TestMessage(
+                            "The `skip` option must evaluate to a `Bool`, but it evaluated to a value of type `$(typeof(skip_result))`.",
+                            TestItemServerProtocol.Location(
+                                params.uri,
+                                TestItemServerProtocol.Position(params.line, 1)
+                            )
+                        )
+                    ],
+                    duration = missing
+                )
+            )
+        end
+    end
 
     for i in params.testSetups
         if !haskey(state.test_setups, (params.packageUri, Symbol(i)))
@@ -318,16 +525,37 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
 
             filepath = uri2filepath(setup_details.uri)
 
+            captured_output = Ref("")
             t0 = time_ns()
             try
-                withpath(filepath) do
-                    Logging.with_logger(Logging.ConsoleLogger(stderr, state.log_level)) do
-                        Base.invokelatest(include_string, mod, code, filepath)
+                with_captured_output(captured_output) do
+                    withpath(filepath) do
+                        Logging.with_logger(Logging.ConsoleLogger(stderr, state.log_level)) do
+                            Base.invokelatest(include_string, mod, code, filepath)
+                        end
                     end
                 end
+                setup_details.duration = (time_ns() - t0) / 1e6 # Convert to milliseconds
+                setup_details.captured_output = captured_output[]
                 setup_details.evaled = true
+
+                JSONRPC.send(
+                    endpoint,
+                    TestItemServerProtocol.setup_evaluated_notification_type,
+                    TestItemServerProtocol.SetupEvaluatedParams(
+                        name = setup_details.name,
+                        packageUri = params.packageUri,
+                        durationMs = setup_details.duration,
+                        output = setup_details.captured_output,
+                    )
+                )
             catch err
                 elapsed_time = (time_ns() - t0) / 1e6 # Convert to milliseconds
+
+                # Whatever the setup printed before it failed is the most useful thing the
+                # user can be shown, so it is replayed here rather than discarded. It is
+                # deliberately not cached: the setup stays unevaluated and will be retried.
+                replay_setup_output(setup_details.name, :module, captured_output[])
 
                 bt = catch_backtrace()
                 st = stacktrace(bt)
@@ -423,6 +651,11 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
         try
             if testsetup_details.kind==:module
                 Core.eval(mod, :(using ..Testsetups.$(Symbol(i))))
+
+                # Replayed for every item that declares the setup, not just the one that
+                # triggered the single evaluation — and on a pooled process that evaluated it
+                # during an earlier run, where no item would otherwise show it at all.
+                replay_setup_output(testsetup_details.name, :module, testsetup_details.captured_output)
             elseif testsetup_details.kind==:snippet
                 testsnippet_filepath = uri2filepath(testsetup_details.uri)
                 testsnippet_code = string('\n'^(testsetup_details.line-1), ' '^(testsetup_details.column-1), testsetup_details.code)
@@ -433,13 +666,35 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
                         DebugAdapter.debug_code(debug_session, mod, testsnippet_code, testsnippet_filepath)
                     else
                         mode == "Coverage" && clear_coverage_data()
+                        # A snippet is re-evaluated into every item's scope, so its output
+                        # already reached every dependent item. It is still captured and
+                        # replayed, so that it carries the same fence as a `@testmodule`'s
+                        # and so the controller learns what it cost.
+                        captured_output = Ref("")
+                        t0 = time_ns()
                         try
-                            Logging.with_logger(Logging.ConsoleLogger(stderr, state.log_level)) do
-                                Base.invokelatest(include_string, mod, testsnippet_code, testsnippet_filepath)
+                            with_captured_output(captured_output) do
+                                Logging.with_logger(Logging.ConsoleLogger(stderr, state.log_level)) do
+                                    Base.invokelatest(include_string, mod, testsnippet_code, testsnippet_filepath)
+                                end
                             end
                         finally
+                            testsetup_details.duration = (time_ns() - t0) / 1e6 # Convert to milliseconds
+                            testsetup_details.captured_output = captured_output[]
                             mode == "Coverage" && collect_coverage_data!(coverage_results, coverage_root_uris)
+                            replay_setup_output(testsetup_details.name, :snippet, captured_output[])
                         end
+
+                        JSONRPC.send(
+                            endpoint,
+                            TestItemServerProtocol.setup_evaluated_notification_type,
+                            TestItemServerProtocol.SetupEvaluatedParams(
+                                name = testsetup_details.name,
+                                packageUri = params.packageUri,
+                                durationMs = testsetup_details.duration,
+                                output = testsetup_details.captured_output,
+                            )
+                        )
                     end
                 end
             else
@@ -477,6 +732,20 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
 
     elapsed_time = UInt64(0)
 
+    # Perf counters are armed around the item body only, so the setups evaluated above are
+    # not charged to whichever item happened to trigger them.
+    perf = missing
+    perf_collected = false
+    gc_before = start_gc_timing()
+    compile_before = start_compile_timing()
+
+    collect_perf! = () -> begin
+        perf_collected && return nothing
+        perf_collected = true
+        perf = collect_perf_stats(elapsed_time, gc_before, compile_before)
+        return nothing
+    end
+
     inner_test_function = () -> begin
         t0 = time_ns()
         try
@@ -496,11 +765,13 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
                     end
                 end
                 elapsed_time = (time_ns() - t0) / 1e6 # Convert to milliseconds
+                collect_perf!()
             end
 
             return nothing
         catch err
             elapsed_time = (time_ns() - t0) / 1e6 # Convert to milliseconds
+            collect_perf!()
 
             bt = catch_backtrace()
             st = stacktrace(bt)
@@ -524,9 +795,14 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
                             stackTrace = stack_frames,
                         )
                     ],
-                    duration = missing
+                    duration = missing,
+                    perf = perf
                 )
             )
+        finally
+            # Belt and braces: whatever path we leave by, the compile-timing counter this
+            # item enabled has to be disabled again.
+            collect_perf!()
         end
     end
 
@@ -559,7 +835,8 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
             TestItemServerProtocol.PassedParams(
                 testItemId = params.id,
                 duration = elapsed_time,
-                coverage = process_coverage_data(coverage_results)
+                coverage = process_coverage_data(coverage_results),
+                perf = perf
             )
         )
     catch err
@@ -571,7 +848,8 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
                 TestItemServerProtocol.FailedParams(
                     testItemId = params.id,
                     messages = [ create_test_message_for_failed(i) for i in failed_tests],
-                    duration = elapsed_time
+                    duration = elapsed_time,
+                    perf = perf
                 )
             )
         else
@@ -774,7 +1052,9 @@ function configure_test_run_request(params::TestItemServerProtocol.ConfigureTest
                 i.line,
                 i.column,
                 i.code,
-                false
+                false,
+                "",
+                nothing
             )
         else
             val = state.test_setups[key]
@@ -783,6 +1063,11 @@ function configure_test_run_request(params::TestItemServerProtocol.ConfigureTest
                 val.evaled = false
                 val.code = i.code
                 val.kind = Symbol(i.kind)
+                # The cached output describes the *previous* code, so it must not be
+                # replayed onto items in this run — the setup will be re-evaluated and
+                # captured again.
+                val.captured_output = ""
+                val.duration = nothing
             end
 
             val.uri = i.uri
