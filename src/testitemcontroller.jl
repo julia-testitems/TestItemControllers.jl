@@ -1244,9 +1244,10 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
             end
             _check_testrun_complete!(c, tr)
             return
-        else
+        elseif !recycled
             # Process was functional and was killed after running items (e.g., timeout).
-            # Fall through to redistribute remaining un-started items.
+            # Fall through to redistribute remaining un-started items. A memory recycle
+            # takes the same path but has already said so above, in accurate terms.
             @info "Test process '$(terminated_proc_id)' terminated after running items, redistributing $(length(items_to_redistribute)) remaining item(s)"
         end
     end
@@ -1257,7 +1258,10 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
         return
     end
 
-    @info "Redistributing $(length(items_to_redistribute)) un-started item(s) from crashed process '$(terminated_proc_id)'"
+    # Never call a memory recycle a crash: this is the diagnostic path the feature exists to
+    # keep readable, and a deliberate exit reported as a crash sends anyone reading a CI log
+    # looking for a fault that isn't there.
+    @info "Redistributing $(length(items_to_redistribute)) un-started item(s) from $(recycled ? "recycled" : "crashed") process '$(terminated_proc_id)'"
 
     # Try to find another live process in the same env
     recipient_pid = nothing
