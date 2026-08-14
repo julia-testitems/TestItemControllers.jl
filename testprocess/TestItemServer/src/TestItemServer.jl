@@ -1213,6 +1213,11 @@ function runner_loop(state::TestProcessState)
                     @info "Stopping this test process: system memory use is above the configured threshold of $(state.memory_threshold). The controller will redistribute the remaining test items."
                     flush(stderr)
                     flush(stdout)
+                    # Must precede `exit`: it tears the runtime down from this thread, and
+                    # racing the watchdog while it is still in Julia code crashed the process
+                    # (an `EXCEPTION_ACCESS_VIOLATION` in the JIT on Windows) or left it
+                    # failing to exit at all, which stalled the controller's shutdown.
+                    stop_watchdog!()
                     exit(MEMORY_RECYCLE_EXIT_CODE)
                 end
             end

@@ -103,3 +103,29 @@ end
     created = filter(e -> e.event == :process_created, result.process_events)
     @test length(created) > 1
 end
+
+@testitem "A recycling test process exits without stranding the controller" setup=[TestHelpers] begin
+    # Regression test. `exit` tears the runtime down from the calling thread, so exiting
+    # while the watchdog was still running Julia code raced it: on Windows that surfaced as
+    # an `EXCEPTION_ACCESS_VIOLATION` inside the JIT, and otherwise as a process that never
+    # exited — which stranded the controller in shutdown, waiting for a termination message
+    # that could not arrive. The run itself completed, so only the shutdown hung, which is
+    # why the three-item test above did not catch it.
+    #
+    # Two items on one process is the shape that reproduced: exactly one recycle, then a
+    # replacement that finishes the run and is shut down normally. The assertion that
+    # matters is simply that this returns at all.
+    pkg_path = joinpath(TestHelpers.TESTDATA_DIR, "BasicPackage")
+    discovered = TestHelpers.discover_test_items(pkg_path)
+
+    items = filter(i -> i.label in ("add works", "greet works"), discovered.items)
+    @test length(items) == 2
+
+    result = TestHelpers.run_testrun(
+        items, discovered.setups, discovered;
+        memory_threshold=0.0, max_procs=1, timeout=180,
+    )
+
+    @test length(filter(e -> e.event == :passed, result.events)) == 2
+    @test isempty(filter(e -> e.event in (:failed, :errored), result.events))
+end

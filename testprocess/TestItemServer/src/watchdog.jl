@@ -43,6 +43,9 @@ const WATCHDOG_DEADLINE = Ref{Float64}(0.0)
 const WATCHDOG_ITEM_ID = Ref{String}("")
 const WATCHDOG_ITEM_TIMEOUT_MS = Ref{Float64}(0.0)
 const WATCHDOG_RUNNING = Ref{Bool}(false)
+# Asks the watchdog thread to leave its loop. Set before a deliberate `exit`, so the runtime
+# is not torn down while another thread is still running Julia code — see `stop_watchdog!`.
+const WATCHDOG_STOP = Ref{Bool}(false)
 
 function _init_watchdog_globals!()
     WATCHDOG_FILE[] = nothing
@@ -51,6 +54,7 @@ function _init_watchdog_globals!()
     WATCHDOG_ITEM_ID[] = ""
     WATCHDOG_ITEM_TIMEOUT_MS[] = 0.0
     WATCHDOG_RUNNING[] = false
+    WATCHDOG_STOP[] = false
     return nothing
 end
 
@@ -162,7 +166,7 @@ function _build_dump(testitem_id::AbstractString, timeout_ms::Float64)
 end
 
 function _watchdog_loop()
-    while true
+    while !WATCHDOG_STOP[]
         Libc.systemsleep(WATCHDOG_POLL_SECONDS)
 
         # Mandatory. This loop neither allocates nor yields, and `Libc.systemsleep` is a
@@ -187,6 +191,9 @@ function _watchdog_loop()
             # Deliberately swallowed — a failing watchdog must not take the process down.
         end
     end
+    # Lets `stop_watchdog!` see that this thread is out of Julia code before the caller exits.
+    WATCHDOG_RUNNING[] = false
+    return nothing
 end
 
 """
@@ -252,5 +259,30 @@ Cancel any pending dump. Cheap enough to call unconditionally after every test i
 """
 function disarm_watchdog!()
     WATCHDOG_DEADLINE[] = 0.0
+    return nothing
+end
+
+"""
+    stop_watchdog!()
+
+Ask the watchdog thread to leave its loop and wait briefly for it to do so.
+
+Call this before any deliberate `exit` from the runner loop. `exit` tears the runtime down
+from the calling thread, and if the watchdog is still executing Julia code — a safepoint, an
+allocation, a JIT-compiled frame — that teardown races it. On Windows that surfaced as an
+`EXCEPTION_ACCESS_VIOLATION` inside the JIT; elsewhere it showed up as the process failing
+to exit at all, which stalled controller shutdown.
+"""
+function stop_watchdog!()
+    WATCHDOG_DEADLINE[] = 0.0
+    WATCHDOG_STOP[] = true
+    WATCHDOG_RUNNING[] || return nothing
+
+    # One poll interval is enough for the loop to observe the flag; the small margin covers
+    # a thread that was mid-sleep when it was set.
+    deadline = time() + 10 * WATCHDOG_POLL_SECONDS
+    while WATCHDOG_RUNNING[] && time() < deadline
+        Libc.systemsleep(WATCHDOG_POLL_SECONDS)
+    end
     return nothing
 end
