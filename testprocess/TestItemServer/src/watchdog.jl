@@ -91,6 +91,7 @@ function _capture_profile(prof::Module)
         t0 = time()
         while time() - t0 < WATCHDOG_PROFILE_SECONDS
             Libc.systemsleep(WATCHDOG_POLL_SECONDS)
+            GC.safepoint()  # same reason as in `_watchdog_loop`
         end
     finally
         prof.stop_timer()
@@ -163,6 +164,14 @@ end
 function _watchdog_loop()
     while true
         Libc.systemsleep(WATCHDOG_POLL_SECONDS)
+
+        # Mandatory. This loop neither allocates nor yields, and `Libc.systemsleep` is a
+        # plain `ccall`, so without an explicit safepoint the thread never becomes
+        # collectable — and `GC.gc(true)` between test items, which stops the world, blocks
+        # here forever. Verified: removing this deadlocks the test process on its first
+        # inter-item collection, which is why the watchdog cannot use a yield-free loop
+        # without one.
+        GC.safepoint()
 
         deadline = WATCHDOG_DEADLINE[]
         (deadline > 0.0 && time() >= deadline) || continue
