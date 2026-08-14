@@ -104,6 +104,27 @@
         return (items=items, setups=setups, package_name=pkg_name, package_uri=pkg_uri, project_uri=proj_uri, env_content_hash=content_hash)
     end
 
+    # Returns a copy of `item` carrying a `skip` option. Discovery does not supply one yet —
+    # `option_skip` reaches `TestItemDetail` from JuliaWorkspaces, which is stream S1 — so
+    # tests for the test-process side of `skip` set it here instead.
+    function with_skip(item::TestItemDetail, skip::Union{Bool,String})
+        return TestItemDetail(
+            item.id,
+            item.uri,
+            item.label,
+            item.package_name,
+            item.package_uri,
+            item.option_default_imports,
+            item.test_setups,
+            item.line,
+            item.column,
+            item.code,
+            item.code_line,
+            item.code_column,
+            skip,
+        )
+    end
+
     function make_test_environment(; mode="Run", julia_cmd=joinpath(Sys.BINDIR, "julia"), julia_args=String[], package_name="", package_uri="", project_uri=nothing, env_content_hash=nothing)
         TestEnvironment(
             "test-env-1",
@@ -134,11 +155,21 @@
         run_testrun(items, setups; _env_kwargs(discovered)..., kwargs...)
     end
 
-    function run_testrun(items, setups; mode="Run", max_procs=1, timeout=300, coverage_root_uris=nothing, log_level=:Debug, julia_cmd=joinpath(Sys.BINDIR, "julia"), julia_args=String[], item_timeouts=Dict{String,Float64}(), package_name="", package_uri="", project_uri=nothing, env_content_hash=nothing)
+    # `n_runs > 1` executes that many test runs back-to-back against **one** controller, so
+    # the second run gets the pooled, already-warm test process of the first. `runs` in the
+    # returned value holds the per-run events and output; `events`/`outputs` are the union
+    # across runs, which is what a single-run caller wants.
+    function run_testrun(items, setups; mode="Run", max_procs=1, timeout=300, coverage_root_uris=nothing, log_level=:Debug, julia_cmd=joinpath(Sys.BINDIR, "julia"), julia_args=String[], item_timeouts=Dict{String,Float64}(), package_name="", package_uri="", project_uri=nothing, env_content_hash=nothing, n_runs=1)
         events = NamedTuple[]
         events_lock = ReentrantLock()
         push_event!(e) = lock(events_lock) do
             push!(events, e)
+        end
+
+        outputs = Dict{Union{Nothing,String},String}()
+        outputs_lock = ReentrantLock()
+        push_output!(item_id, output) = lock(outputs_lock) do
+            outputs[item_id] = get(outputs, item_id, "") * output
         end
 
         process_events = NamedTuple[]
@@ -149,11 +180,11 @@
 
         callbacks = ControllerCallbacks(
             on_testitem_started = (run_id, item_id, test_env_id) -> push_event!((event=:started, testrun_id=run_id, testitem_id=item_id)),
-            on_testitem_passed = (run_id, item_id, test_env_id, duration) -> push_event!((event=:passed, testrun_id=run_id, testitem_id=item_id, duration=duration)),
-            on_testitem_failed = (run_id, item_id, test_env_id, messages, duration) -> push_event!((event=:failed, testrun_id=run_id, testitem_id=item_id, messages=messages, duration=duration)),
-            on_testitem_errored = (run_id, item_id, test_env_id, messages, duration) -> push_event!((event=:errored, testrun_id=run_id, testitem_id=item_id, messages=messages, duration=duration)),
-            on_testitem_skipped = (run_id, item_id, test_env_id) -> push_event!((event=:skipped, testrun_id=run_id, testitem_id=item_id)),
-            on_append_output = (run_id, item_id, test_env_id, output) -> nothing,
+            on_testitem_passed = (run_id, item_id, test_env_id, duration, perf=nothing) -> push_event!((event=:passed, testrun_id=run_id, testitem_id=item_id, duration=duration, perf=perf)),
+            on_testitem_failed = (run_id, item_id, test_env_id, messages, duration, perf=nothing) -> push_event!((event=:failed, testrun_id=run_id, testitem_id=item_id, messages=messages, duration=duration, perf=perf)),
+            on_testitem_errored = (run_id, item_id, test_env_id, messages, duration, perf=nothing) -> push_event!((event=:errored, testrun_id=run_id, testitem_id=item_id, messages=messages, duration=duration, perf=perf)),
+            on_testitem_skipped = (run_id, item_id, test_env_id, reason=nothing) -> push_event!((event=:skipped, testrun_id=run_id, testitem_id=item_id, reason=reason)),
+            on_append_output = (run_id, item_id, test_env_id, output) -> push_output!(item_id, output),
             on_attach_debugger = (run_id, pipe_name) -> nothing,
             on_process_created = (id, test_env_id) -> push_process_event!((event=:process_created, id=id, test_env_id=test_env_id)),
 
@@ -164,7 +195,6 @@
 
         controller = TestItemController(callbacks; log_level=log_level)
         test_env = make_test_environment(; mode=mode, julia_cmd=julia_cmd, julia_args=julia_args, package_name=package_name, package_uri=package_uri, project_uri=project_uri, env_content_hash=env_content_hash)
-        testrun_id = string(UUIDs.uuid4())
 
         # Build work units from items
         work_units = [TestRunItem(item.id, test_env.id, get(item_timeouts, item.id, nothing), log_level) for item in items]
@@ -176,45 +206,64 @@
         end
 
         coverage_result = nothing
-        testrun_task = @async try
-            coverage_result = execute_testrun(
-                controller,
-                testrun_id,
-                [test_env],
-                items,
-                work_units,
-                setups,
-                max_procs,
-                nothing;  # token
-                coverage_root_uris=coverage_root_uris
-            )
-        catch err
-            @error "Test run error" exception=(err, catch_backtrace())
-        end
+        runs = NamedTuple[]
 
-        # Wait for test run with timeout
-        timed_out = Ref(false)
-        timer = Timer(timeout)
-        @async begin
-            wait(timer)
-            if !istaskdone(testrun_task)
-                timed_out[] = true
-                @warn "Test run timed out after $(timeout)s, shutting down"
-                shutdown(controller)
+        for run_idx in 1:n_runs
+            events_before = length(events)
+            outputs_before = lock(outputs_lock) do
+                copy(outputs)
             end
-        end
 
-        wait(testrun_task)
-        close(timer)
+            testrun_id = string(UUIDs.uuid4())
+
+            testrun_task = @async try
+                coverage_result = execute_testrun(
+                    controller,
+                    testrun_id,
+                    [test_env],
+                    items,
+                    work_units,
+                    setups,
+                    max_procs,
+                    nothing;  # token
+                    coverage_root_uris=coverage_root_uris
+                )
+            catch err
+                @error "Test run error" exception=(err, catch_backtrace())
+            end
+
+            # Wait for test run with timeout
+            timed_out = Ref(false)
+            timer = Timer(timeout)
+            @async begin
+                wait(timer)
+                if !istaskdone(testrun_task)
+                    timed_out[] = true
+                    @warn "Test run timed out after $(timeout)s, shutting down"
+                    shutdown(controller)
+                end
+            end
+
+            wait(testrun_task)
+            close(timer)
+
+            if timed_out[]
+                shutdown(controller)
+                wait(controller_task)
+                error("run_testrun timed out after $(timeout)s")
+            end
+
+            run_events = events[events_before+1:end]
+            run_outputs = lock(outputs_lock) do
+                Dict(k => v[length(get(outputs_before, k, ""))+1:end] for (k, v) in outputs)
+            end
+            push!(runs, (testrun_id=testrun_id, events=run_events, outputs=run_outputs))
+        end
 
         shutdown(controller)
         wait(controller_task)
 
-        if timed_out[]
-            error("run_testrun timed out after $(timeout)s")
-        end
-
-        return (events=events, process_events=process_events, coverage=coverage_result)
+        return (events=events, process_events=process_events, coverage=coverage_result, outputs=outputs, runs=runs)
     end
 
     import UUIDs

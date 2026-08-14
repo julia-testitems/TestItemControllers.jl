@@ -83,7 +83,10 @@ struct TestItemPassedMsg <: ReactorMessage
     testitem_id::String
     duration::Float64
     coverage::Union{Nothing,Vector{Any}}
+    perf::Union{Nothing,PerfStats}
 end
+TestItemPassedMsg(testrun_id, testprocess_id, testitem_id, duration, coverage) =
+    TestItemPassedMsg(testrun_id, testprocess_id, testitem_id, duration, coverage, nothing)
 
 struct TestItemFailedMsg <: ReactorMessage
     testrun_id::String
@@ -91,7 +94,10 @@ struct TestItemFailedMsg <: ReactorMessage
     testitem_id::String
     messages::Vector{Any}
     duration::Union{Nothing,Float64}
+    perf::Union{Nothing,PerfStats}
 end
+TestItemFailedMsg(testrun_id, testprocess_id, testitem_id, messages, duration) =
+    TestItemFailedMsg(testrun_id, testprocess_id, testitem_id, messages, duration, nothing)
 
 struct TestItemErroredMsg <: ReactorMessage
     testrun_id::String
@@ -99,12 +105,35 @@ struct TestItemErroredMsg <: ReactorMessage
     testitem_id::String
     messages::Vector{Any}
     duration::Union{Nothing,Float64}
+    perf::Union{Nothing,PerfStats}
 end
+TestItemErroredMsg(testrun_id, testprocess_id, testitem_id, messages, duration) =
+    TestItemErroredMsg(testrun_id, testprocess_id, testitem_id, messages, duration, nothing)
 
 struct TestItemSkippedStolenMsg <: ReactorMessage
     testrun_id::String
     testprocess_id::String
     testitem_id::String
+end
+
+# The test process declined to run an item because its `skip` expression was true. Nothing
+# to do with `TestItemSkippedStolenMsg`, which reports an item another process claimed.
+struct TestItemSkippedMsg <: ReactorMessage
+    testrun_id::String
+    testprocess_id::String
+    testitem_id::String
+    reason::Union{Nothing,String}
+end
+
+# A `@testmodule`/`@testsnippet` was evaluated on a test process. Process-level rather than
+# run-level: the result stays valid for as long as the process caches the setup, including
+# across runs.
+struct TestSetupEvaluatedMsg <: ReactorMessage
+    testprocess_id::String
+    package_uri::String
+    name::String
+    duration::Union{Nothing,Float64}
+    output::String
 end
 
 struct AppendOutputMsg <: ReactorMessage
