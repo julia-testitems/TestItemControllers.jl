@@ -73,6 +73,60 @@ function _truncate_for_log(s::AbstractString; max_bytes::Int=8192)
     return SubString(s, 1, i) * "... ($(ncodeunits(s) - i) bytes truncated)"
 end
 
+# Number of interactive threads reserved in a test process. The main task — and therefore
+# the runner loop and every test item — occupies the first; the hang watchdog gets the
+# second, which is what lets it run while an item has the main thread wedged. Only the
+# *default* pool is sized from the user's `juliaNumThreads`, so `Threads.nthreads()` inside
+# a test item is unchanged by this. Requires Julia >= 1.9, which is where `--threads=N,M`
+# and the interactive threadpool arrived.
+const WATCHDOG_INTERACTIVE_THREADS = 2
+
+# How the diagnostics file reaches the test process, and the exit code it uses to say it is
+# stopping for memory recycling rather than crashing. Both are duplicated in the test
+# server (`testprocess/TestItemServer/src/watchdog.jl` and `TestItemServer.jl`); they are
+# not in `shared/testserver_protocol.jl` because they are not part of the JSONRPC schema.
+const DIAGNOSTICS_FILE_ENV_VAR = "JULIA_TESTITEMSERVER_DIAGNOSTICS_FILE"
+const MEMORY_RECYCLE_EXIT_CODE = 66
+
+# Where a test process writes its hang diagnostics. Derived from the process id rather than
+# tracked on the process state, so the controller can find it again from the timeout handler.
+_diagnostics_file_path(testprocess_id::AbstractString) =
+    joinpath(tempdir(), "testitemserver-diagnostics-$(testprocess_id).log")
+
+# How long the controller waits past an item's timeout before killing its test process, so
+# the process's watchdog has time to write a dump first.
+const WATCHDOG_KILL_GRACE_SECONDS = 5.0
+
+# Whatever the test process's watchdog has written so far, or `nothing` when it wrote
+# nothing. Consuming the file keeps a second timeout on the same process from replaying an
+# earlier item's dump.
+function _read_diagnostics(testprocess_id::AbstractString)
+    file = _diagnostics_file_path(testprocess_id)
+    return try
+        isfile(file) || return nothing
+        content = read(file, String)
+        try rm(file, force=true) catch end
+        isempty(content) ? nothing : content
+    catch err
+        @debug "Could not read hang diagnostics" testprocess_id exception=(err, catch_backtrace())
+        nothing
+    end
+end
+
+# Build the `--threads` value for a test process, folding in the interactive threads the
+# watchdog needs. `juliaNumThreads` may already carry an `N,M` pair, in which case we only
+# raise `M` far enough to leave the watchdog a thread of its own.
+function _thread_spec(juliaNumThreads::Union{Nothing,String})
+    spec = juliaNumThreads === nothing || juliaNumThreads == "" ? "1" : juliaNumThreads
+    parts = split(spec, ',')
+    if length(parts) == 1
+        return "$(parts[1]),$WATCHDOG_INTERACTIVE_THREADS"
+    end
+    interactive = tryparse(Int, parts[2])
+    interactive === nothing && return spec # e.g. "auto,auto" — leave the user's spec alone
+    return "$(parts[1]),$(max(interactive, WATCHDOG_INTERACTIVE_THREADS))"
+end
+
 struct TestProcessCrashException <: Exception
     testprocess_id::String
     exitcode::Union{Int,Nothing}
@@ -80,8 +134,9 @@ struct TestProcessCrashException <: Exception
     captured_output::String
 end
 
-function start(testprocess_id, reactor_channel, ps::TestProcessState, env::ProcessEnv, debug_pipe_name, error_handler_file, crash_reporting_pipename, token)
+function start(testprocess_id, reactor_channel, ps::TestProcessState, env::ProcessEnv, debug_pipe_name, error_handler_file, crash_reporting_pipename, julia_version, token)
     pipe_name = JSONRPC.generate_pipe_name()
+    diagnostics_file = _diagnostics_file_path(testprocess_id)
     server = Sockets.listen(pipe_name)
     try
 
@@ -101,7 +156,14 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
                 push!(jlArgs, "--check-bounds=$(env.check_bounds)")
             end
 
-            if env.juliaNumThreads!==nothing && env.juliaNumThreads == "auto"
+            # Reserve the watchdog's interactive thread where the Julia version supports it,
+            # otherwise keep the pre-existing behaviour exactly (the watchdog then degrades
+            # to "no diagnostic dump", which `start_watchdog!` handles).
+            watchdog_threads_supported = julia_version !== nothing && julia_version >= v"1.9"
+
+            if watchdog_threads_supported
+                push!(jlArgs, "--threads=$(_thread_spec(env.juliaNumThreads))")
+            elseif env.juliaNumThreads!==nothing && env.juliaNumThreads == "auto"
                 push!(jlArgs, "--threads=auto")
             end
 
@@ -121,9 +183,15 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
                 end
             end
 
-            if env.juliaNumThreads!==nothing && env.juliaNumThreads!="auto" && env.juliaNumThreads!=""
+            # Redundant once `--threads` is on the command line, and it would only confuse
+            # the picture if the two disagreed.
+            if !watchdog_threads_supported && env.juliaNumThreads!==nothing && env.juliaNumThreads!="auto" && env.juliaNumThreads!=""
                 jlEnv["JULIA_NUM_THREADS"] = env.juliaNumThreads
             end
+
+            # Set after the user's env overlay so a test environment cannot accidentally
+            # redirect the diagnostics file.
+            jlEnv[DIAGNOSTICS_FILE_ENV_VAR] = diagnostics_file
 
             error_handler_file = error_handler_file === nothing ? [] : [error_handler_file]
             crash_reporting_pipename = crash_reporting_pipename === nothing ? [] : [crash_reporting_pipename]
@@ -358,6 +426,9 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
         end
     finally
         close(server)
+        # The controller reads this while the process is still alive (from the timeout
+        # handler); once it is gone the file has no further use.
+        try rm(diagnostics_file, force=true) catch end
     end
-    
+
 end
