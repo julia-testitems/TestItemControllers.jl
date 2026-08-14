@@ -14,6 +14,11 @@ the reactor event loop, then use [`execute_testrun`](@ref) to submit work.
 - `error_handler_file` — optional path to a Julia file loaded in child processes for custom error handling.
 - `crash_reporting_pipename` — optional named-pipe path for crash diagnostics.
 - `log_level::Symbol` — minimum log level (default `:Info`).
+- `schedule::Symbol` — how test items are distributed over processes (default `:duration`).
+  `:duration` uses the failures-first, duration- and setup-aware model in
+  [`schedule_testitems`](@ref), falling back to contiguous chunking on the first run of a
+  session, when there is no history to work from. `:contiguous` always chunks, which is
+  the behaviour of releases before this option existed.
 
 # Lifecycle
 
@@ -54,11 +59,22 @@ mutable struct TestItemController{CB<:ControllerCallbacks}
     log_level::Symbol
     controller_fsm::FSM{ControllerPhase}
 
+    # Scheduling history, in memory and keyed by the (stable) test item id. It survives
+    # across the test runs of one session; nothing is persisted to disk.
+    schedule::Symbol
+    last_status::Dict{String,Symbol}
+    last_duration::Dict{String,Float64}                 # milliseconds
+    setup_cost::Dict{Tuple{String,String},Float64}      # (package_uri, setup name) → milliseconds
+
     function TestItemController(
         callbacks::CB;
         error_handler_file=nothing,
         crash_reporting_pipename=nothing,
-        log_level::Symbol=:Info) where {CB<:ControllerCallbacks}
+        log_level::Symbol=:Info,
+        schedule::Symbol=:duration) where {CB<:ControllerCallbacks}
+
+        schedule in (:duration, :contiguous) ||
+            throw(ArgumentError("schedule must be :duration or :contiguous, got $(repr(schedule))"))
 
         return new{CB}(
             callbacks,
@@ -72,7 +88,11 @@ mutable struct TestItemController{CB<:ControllerCallbacks}
             error_handler_file,
             crash_reporting_pipename,
             log_level,
-            controller_fsm("controller")
+            controller_fsm("controller"),
+            schedule,
+            Dict{String,Symbol}(),
+            Dict{String,Float64}(),
+            Dict{Tuple{String,String},Float64}(),
         )
     end
 end
@@ -505,24 +525,9 @@ function handle!(c::TestItemController, msg::ProcsAcquiredMsg)
 
     @info "Acquired $(sum(length, values(msg.procs), init=0)) test process(es) for test run"
 
-    # Distribute test items over test processes
+    # Distribute test items over test processes — see src/scheduling.jl
     for (env, proc_ids) in pairs(msg.procs)
-        assigned_for_env = 0
-        n_procs_for_env = length(proc_ids)
-        for pid in proc_ids
-            tr.stolen_ids_by_proc[pid] = String[]
-
-            if !haskey(tr.testitem_ids_by_proc, pid)
-                # Divvy up items: take a chunk for this process
-                all_env_items = _get_unchunked_items(tr, env)
-                procs_remaining = n_procs_for_env - assigned_for_env
-                chunk_size = max(1, div(length(all_env_items), procs_remaining, RoundUp))
-                chunk = splice!(all_env_items, 1:min(chunk_size, length(all_env_items)))
-                tr.testitem_ids_by_proc[pid] = chunk
-                assigned_for_env += 1
-                @info "Assigned $(length(chunk)) test item(s) to process '$(pid)'"
-            end
-        end
+        _assign_items_to_procs!(c, tr, env, proc_ids)
     end
 
     # Dispatch buffered ready notifications
@@ -680,6 +685,7 @@ function handle!(c::TestItemController, msg::TestItemStartedMsg)
     end
 
     c.callbacks.on_testitem_started(msg.testrun_id, msg.testitem_id, test_env_id)
+    _record_testitem_started!(c, msg.testitem_id)
 
     # Start timeout if work unit has one
     if haskey(c.test_processes, msg.testprocess_id)
@@ -762,6 +768,7 @@ function handle!(c::TestItemController, msg::TestItemPassedMsg)
 
         push!(tr.reported_items, msg.testitem_id)
         _notify_testitem_passed(c.callbacks, msg.testrun_id, msg.testitem_id, test_env_id, msg.duration, msg.perf)
+        _record_testitem_result!(c, msg.testitem_id, :passed, msg.duration)
 
         if msg.coverage !== nothing
             append!(tr.coverage, map(i -> CoverageTools.FileCoverage(uri2filepath(i.uri), "", i.coverage), msg.coverage))
@@ -845,6 +852,7 @@ function handle!(c::TestItemController, msg::TestItemFailedMsg)
             msg.duration,
             msg.perf
         )
+        _record_testitem_result!(c, msg.testitem_id, :failed, msg.duration)
     else
         _log_unexpected_missing_work(tr, msg.testitem_id, msg.testprocess_id, test_env_id, "failed")
         _remove_from_proc_queue!(tr, msg.testprocess_id, msg.testitem_id)
@@ -912,6 +920,7 @@ function handle!(c::TestItemController, msg::TestItemErroredMsg)
             msg.duration,
             msg.perf
         )
+        _record_testitem_result!(c, msg.testitem_id, :errored, msg.duration)
     else
         _log_unexpected_missing_work(tr, msg.testitem_id, msg.testprocess_id, test_env_id, "errored")
         _remove_from_proc_queue!(tr, msg.testprocess_id, msg.testitem_id)
@@ -1005,12 +1014,22 @@ end
 # onto every item that declares the setup itself; what the controller keeps this for is the
 # cost model, and it therefore survives for as long as the process caches the setup.
 function handle!(c::TestItemController, msg::TestSetupEvaluatedMsg)
+    key = (msg.package_uri, msg.name)
+
+    # Per-process, and only while the process is still around to have the setup cached.
     ps = get(c.test_processes, msg.testprocess_id, nothing)
-    if ps === nothing
-        return false
+    if ps !== nothing
+        ps.loaded_setups[key] = (output=msg.output, duration=msg.duration)
     end
 
-    ps.loaded_setups[(msg.package_uri, msg.name)] = (output=msg.output, duration=msg.duration)
+    # Controller-wide, and deliberately outside the branch above: what a setup costs is a
+    # property of the setup, not of whichever process happened to report it, so it is worth
+    # keeping even when that process has already been recycled or terminated. It feeds the
+    # scheduler's affinity model, which prices duplicating a setup across processes against
+    # the imbalance that relieves.
+    if msg.duration !== nothing
+        c.setup_cost[key] = msg.duration
+    end
 
     return false
 end
