@@ -126,6 +126,39 @@ end
     end
 end
 
+@testitem "Coverage without coverage roots" setup=[TestHelpers] begin
+    if VERSION < v"1.11"
+        @test_skip "Coverage mode requires Julia 1.11+"
+    else
+        using TestItemControllers: filepath2uri
+
+        # `juliati --coverage` never sends `coverageRootUris`. Feeding that `nothing` to
+        # the test process's root filter used to throw a `MethodError`, which surfaced as
+        # a spurious "errored" result for whichever item was running at the time.
+        pkg_path = joinpath(TestHelpers.TESTDATA_DIR, "BasicPackage")
+        discovered = TestHelpers.discover_test_items(pkg_path)
+
+        passing_items = filter(i -> i.label == "add works", discovered.items)
+        @test length(passing_items) == 1
+
+        result = TestHelpers.run_testrun(
+            passing_items, discovered.setups, discovered;
+            mode="Coverage",
+            coverage_root_uris=nothing,
+            timeout=600
+        )
+
+        @test length(filter(e -> e.event == :errored, result.events)) == 0
+        @test length(filter(e -> e.event == :passed, result.events)) == 1
+
+        # With no root restriction every instrumented file is reported, so the package
+        # source must be in there.
+        @test result.coverage !== nothing
+        src_uri = filepath2uri(joinpath(pkg_path, "src", "BasicPackage.jl"))
+        @test length(filter(c -> c.uri == src_uri, result.coverage)) == 1
+    end
+end
+
 @testitem "Coverage root filtering" setup=[TestHelpers] begin
     if VERSION < v"1.11"
         @test_skip "Coverage mode requires Julia 1.11+"

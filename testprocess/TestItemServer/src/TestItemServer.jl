@@ -237,7 +237,16 @@ function collect_coverage_data!(coverage_results, roots)
             rm(lcov_filename)
         end
 
-        filter!(i->isabspath(i.filename) && any(j->startswith(filepath2uri(i.filename), j), roots) && isfile(i.filename), cov_info)
+        # `roots === nothing` means the run put no restriction on which files to report —
+        # the CLI never sends `coverageRootUris`. Feeding that to `any` throws a
+        # `MethodError`, which the caller's `catch` turns into a spurious "errored" result
+        # for whatever test item happened to be running, so the restriction has to be
+        # skipped explicitly rather than left to short-circuit on an empty result.
+        filter!(cov_info) do i
+            isabspath(i.filename) || return false
+            roots !== nothing && !any(j -> startswith(filepath2uri(i.filename), j), roots) && return false
+            return isfile(i.filename)
+        end
 
         append!(coverage_results, cov_info)
     end

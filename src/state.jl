@@ -33,6 +33,12 @@ mutable struct TestProcessState
     test_setups::Any     # Union{Nothing, Vector{TestsetupDetails}}
     coverage_root_uris::Any
     proc_log_level::Symbol
+    # Setups this process has already evaluated, keyed by (package_uri, setup_name). The
+    # captured output is replayed onto every item that declares the setup (not just the one
+    # that happened to trigger evaluation), and the duration feeds the scheduling cost
+    # model. Populated from `setup_evaluated` notifications; survives across test runs
+    # exactly as long as the process's cached setups do.
+    loaded_setups::Dict{Tuple{String,String},@NamedTuple{output::String, duration::Union{Nothing,Float64}}}
     # Exit info captured when the OS process dies (set in _launch_julia_process! catch)
     last_exit_code::Union{Nothing,Int}
     last_term_signal::Union{Nothing,Int}
@@ -67,6 +73,7 @@ function TestProcessState(id::String, env::ProcessEnv;
         nothing,                                        # test_setups
         nothing,                                        # coverage_root_uris
         :Info,                                          # proc_log_level
+        Dict{Tuple{String,String},@NamedTuple{output::String, duration::Union{Nothing,Float64}}}(),  # loaded_setups
         nothing,                                        # last_exit_code
         nothing,                                        # last_term_signal
     )

@@ -80,6 +80,10 @@ Full metadata for a single `@testitem` block.
 - `line::Int`, `column::Int` — location of the `@testitem` macro call.
 - `code::String` — source code of the test item body.
 - `code_line::Int`, `code_column::Int` — location of the code body start.
+- `option_skip::Union{Bool,String}` — the `skip` kwarg. A `Bool` for a literal, or the
+  source text of an expression that is evaluated *in the test process* immediately before
+  the item would run (so it sees the test process's Julia version and platform, not the
+  controller's). Defaults to `false`.
 """
 struct TestItemDetail
     id::String
@@ -94,6 +98,13 @@ struct TestItemDetail
     code::String
     code_line::Int
     code_column::Int
+    option_skip::Union{Bool,String}
+
+    function TestItemDetail(id, uri, label, package_name, package_uri, option_default_imports,
+            test_setups, line, column, code, code_line, code_column, option_skip=false)
+        return new(id, uri, label, package_name, package_uri, option_default_imports,
+            test_setups, line, column, code, code_line, code_column, option_skip)
+    end
 end
 
 """
@@ -159,6 +170,37 @@ struct TestMessage
     line::Union{Nothing,Int}
     column::Union{Nothing,Int}
     stack_trace::Union{Nothing,Vector{TestMessageStackFrame}}
+end
+
+"""
+    PerfStats
+
+Execution statistics for a single test item, as measured by the test process.
+
+Every field is optional. `elapsed`, `bytes`, `allocs` and `gctime` are always available;
+`compile_time` and `recompile_time` depend on Julia internals that not every version the
+test process supports provides, and are `nothing` there rather than an error.
+
+# Fields
+- `elapsed::Union{Nothing,Float64}` — wall-clock time in milliseconds.
+- `bytes::Union{Nothing,Int}` — bytes allocated.
+- `allocs::Union{Nothing,Int}` — number of allocations.
+- `gctime::Union{Nothing,Float64}` — time spent in GC, in milliseconds.
+- `compile_time::Union{Nothing,Float64}` — time spent compiling, in milliseconds.
+- `recompile_time::Union{Nothing,Float64}` — time spent recompiling, in milliseconds.
+"""
+struct PerfStats
+    elapsed::Union{Nothing,Float64}
+    bytes::Union{Nothing,Int}
+    allocs::Union{Nothing,Int}
+    gctime::Union{Nothing,Float64}
+    compile_time::Union{Nothing,Float64}
+    recompile_time::Union{Nothing,Float64}
+
+    function PerfStats(elapsed=nothing, bytes=nothing, allocs=nothing, gctime=nothing,
+            compile_time=nothing, recompile_time=nothing)
+        return new(elapsed, bytes, allocs, gctime, compile_time, recompile_time)
+    end
 end
 
 """

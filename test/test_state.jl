@@ -154,3 +154,74 @@ end
     # Should have its own independent cancellation source
     @test !CancellationTokens.is_cancellation_requested(CancellationTokens.get_token(rs.cancellation_source))
 end
+
+@testitem "Terminal callbacks accept an optional trailing argument" begin
+    using TestItemControllers: ControllerCallbacks, PerfStats,
+        _notify_testitem_passed, _notify_testitem_failed, _notify_testitem_errored,
+        _notify_testitem_skipped
+
+    seen = Any[]
+
+    # Callbacks written against the original arities must keep working untouched.
+    old = ControllerCallbacks(
+        on_testitem_started = (a, b, c) -> nothing,
+        on_testitem_passed = (a, b, c, d) -> push!(seen, (:passed, 4)),
+        on_testitem_failed = (a, b, c, d, e) -> push!(seen, (:failed, 5)),
+        on_testitem_errored = (a, b, c, d, e) -> push!(seen, (:errored, 5)),
+        on_testitem_skipped = (a, b, c) -> push!(seen, (:skipped, 3)),
+        on_append_output = (a, b, c, d) -> nothing,
+        on_attach_debugger = (a, b) -> nothing,
+    )
+
+    perf = PerfStats(1.0, 2, 3, 4.0, nothing, nothing)
+    _notify_testitem_passed(old, "run", "item", "env", 1.0, perf)
+    _notify_testitem_failed(old, "run", "item", "env", [], 1.0, perf)
+    _notify_testitem_errored(old, "run", "item", "env", [], 1.0, perf)
+    _notify_testitem_skipped(old, "run", "item", "env", "skip=true")
+
+    @test seen == [(:passed, 4), (:failed, 5), (:errored, 5), (:skipped, 3)]
+
+    # Callbacks that opt in get the extra argument.
+    extras = Any[]
+    new = ControllerCallbacks(
+        on_testitem_started = (a, b, c) -> nothing,
+        on_testitem_passed = (a, b, c, d, p) -> push!(extras, p),
+        on_testitem_failed = (a, b, c, d, e, p) -> push!(extras, p),
+        on_testitem_errored = (a, b, c, d, e, p) -> push!(extras, p),
+        on_testitem_skipped = (a, b, c, r) -> push!(extras, r),
+        on_append_output = (a, b, c, d) -> nothing,
+        on_attach_debugger = (a, b) -> nothing,
+    )
+
+    _notify_testitem_passed(new, "run", "item", "env", 1.0, perf)
+    _notify_testitem_failed(new, "run", "item", "env", [], 1.0, perf)
+    _notify_testitem_errored(new, "run", "item", "env", [], 1.0, nothing)
+    _notify_testitem_skipped(new, "run", "item", "env", "skip=true")
+
+    @test extras == [perf, perf, nothing, "skip=true"]
+
+    # And the default — no trailing argument supplied at all.
+    _notify_testitem_passed(new, "run", "item", "env", 1.0)
+    @test extras[end] === nothing
+end
+
+@testitem "TestProcessState starts with no loaded setups" begin
+    using TestItemControllers: TestProcessState, ProcessEnv
+
+    env = ProcessEnv(
+        "file:///project",
+        "file:///mypkg",
+        "MyPkg",
+        "julia",
+        String[],
+        nothing,
+        "Run",
+        Dict{String,Union{String,Nothing}}()
+    )
+    ps = TestProcessState("proc-1", env)
+
+    @test isempty(ps.loaded_setups)
+    ps.loaded_setups[("file:///mypkg", "MySetup")] = (output="hello", duration=12.0)
+    @test ps.loaded_setups[("file:///mypkg", "MySetup")].output == "hello"
+    @test ps.loaded_setups[("file:///mypkg", "MySetup")].duration == 12.0
+end
