@@ -1014,16 +1014,19 @@ end
 # onto every item that declares the setup itself; what the controller keeps this for is the
 # cost model, and it therefore survives for as long as the process caches the setup.
 function handle!(c::TestItemController, msg::TestSetupEvaluatedMsg)
+    key = (msg.package_uri, msg.name)
+
+    # Per-process, and only while the process is still around to have the setup cached.
     ps = get(c.test_processes, msg.testprocess_id, nothing)
-    if ps === nothing
-        return false
+    if ps !== nothing
+        ps.loaded_setups[key] = (output=msg.output, duration=msg.duration)
     end
 
-    key = (msg.package_uri, msg.name)
-    ps.loaded_setups[key] = (output=msg.output, duration=msg.duration)
-
-    # The measured cost also feeds the scheduler's setup-affinity model, which prices
-    # duplicating a setup across processes against the imbalance it relieves.
+    # Controller-wide, and deliberately outside the branch above: what a setup costs is a
+    # property of the setup, not of whichever process happened to report it, so it is worth
+    # keeping even when that process has already been recycled or terminated. It feeds the
+    # scheduler's affinity model, which prices duplicating a setup across processes against
+    # the imbalance that relieves.
     if msg.duration !== nothing
         c.setup_cost[key] = msg.duration
     end

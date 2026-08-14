@@ -218,7 +218,7 @@ end
 
 @testitem "Controller scheduling caches" begin
     using TestItemControllers: TestItemController, ControllerCallbacks,
-        _record_testitem_started!, _record_testitem_result!, SetupEvaluatedMsg, handle!
+        _record_testitem_started!, _record_testitem_result!, TestSetupEvaluatedMsg, handle!
 
     callbacks = ControllerCallbacks(
         on_testitem_started = (a, b, c) -> nothing,
@@ -249,7 +249,7 @@ end
     @test c.last_status["a"] == :failed
     @test c.last_duration["a"] == 12.5
 
-    handle!(c, SetupEvaluatedMsg("proc-1", "MySetup", "file:///pkg", 900.0, "hello"))
+    handle!(c, TestSetupEvaluatedMsg("proc-1", "file:///pkg", "MySetup", 900.0, "hello"))
     @test c.setup_cost[("file:///pkg", "MySetup")] == 900.0
 end
 
