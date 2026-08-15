@@ -86,6 +86,14 @@ TestItemControllers.terminate_test_process
 TestItemControllers.execute_testrun
 ```
 
+```@docs
+TestItemControllers.PerfStats
+```
+
+```@docs
+TestItemControllers.schedule_testitems
+```
+
 ## Callbacks
 
 ```@docs
