@@ -124,18 +124,11 @@ end
 end
 
 @testitem "Perf stats degrade instead of erroring on a Julia without compile timing" setup=[TestHelpers] begin
-    using TestItemControllers: JSON
-
     # `Base.cumulative_compile_timing` only exists from 1.8 on, and the test process supports
     # every version back to 1.0. The degradation contract is that the compile timings come
     # back `nothing` and the item still runs — not that anything throws.
     installed = try
-        config = JSON.parse(read(`juliaup api getconfig1`, String))
-        channels = Set{String}([config["DefaultChannel"]["Name"]])
-        for ch in get(config, "OtherChannels", [])
-            push!(channels, ch["Name"])
-        end
-        channels
+        TestHelpers.installed_juliaup_channels()
     catch err
         Set{String}()
     end
@@ -145,6 +138,9 @@ end
         discovered = TestHelpers.discover_test_items(pkg_path)
         items = filter(i -> i.label == "add works", discovered.items)
 
+        # Deliberately left on the default depot: the "Julia 1.6 platform" item in
+        # test_julia_versions.jl writes to a private layered depot instead, so the two never
+        # contend on the same `compiled/v1.6` cache files even when CI runs them side by side.
         result = TestHelpers.run_testrun(items, discovered.setups, discovered; julia_cmd="julia", julia_args=["+1.6"], timeout=600)
 
         passed_events = filter(e -> e.event == :passed, result.events)

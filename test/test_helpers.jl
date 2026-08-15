@@ -1,9 +1,147 @@
 @testmodule TestHelpers begin
     using JuliaWorkspaces
+    using Test
     using TestItemControllers: TestEnvironment, TestRunItem, TestItemDetail, TestSetupDetail, TestItemController,
-        execute_testrun, shutdown, TestItemControllerProtocol, ControllerCallbacks
+        execute_testrun, shutdown, TestItemControllerProtocol, ControllerCallbacks, JSON
 
     const TESTDATA_DIR = normpath(joinpath(@__DIR__, "..", "testdata"))
+
+    const _HELPER_LOCK = ReentrantLock()
+
+    const _JULIAUP_CHANNELS = Ref{Union{Nothing,Set{String}}}(nothing)
+
+    """
+        installed_juliaup_channels()
+
+    The set of juliaup channel names installed on this machine. Throws if juliaup cannot be
+    queried; callers that want to degrade gracefully should wrap this in a `try`. Memoized,
+    so a worker running many per-version test items only shells out once.
+    """
+    function installed_juliaup_channels()
+        lock(_HELPER_LOCK) do
+            cached = _JULIAUP_CHANNELS[]
+            cached === nothing || return cached
+
+            config = try
+                JSON.parse(read(`juliaup api getconfig1`, String))
+            catch e
+                error("Failed to query juliaup. Is juliaup installed? Error: $e")
+            end
+
+            channels = Set{String}()
+            push!(channels, config["DefaultChannel"]["Name"])
+            for ch in get(config, "OtherChannels", [])
+                push!(channels, ch["Name"])
+            end
+
+            _JULIAUP_CHANNELS[] = channels
+            return channels
+        end
+    end
+
+    const _DEPOT_ENVS = Dict{String,Dict{String,Union{String,Nothing}}}()
+
+    """
+        isolated_depot_env(version)
+
+    An environment overlay that points a test process at a *private, writable* depot layered
+    on top of that Julia's own default depots.
+
+    Per-version test items run concurrently, and every worker run reaches Pkg (`Pkg.develop`
+    on Julia <= 1.10, `Pkg.instantiate` inside TestEnv), which rewrites depot-wide usage logs
+    such as `logs/manifest_usage.toml` without locking on older Pkg versions. Making the
+    private depot `DEPOT_PATH[1]` sends every *write* — new precompile caches, installs, usage
+    logs — there instead of into the shared depot.
+
+    Reads are unaffected: Julia searches all depot entries for cache files and packages, so
+    existing `~/.julia/compiled/vX.Y` entries stay warm.
+
+    The default entries are queried from the target Julia rather than guessed, because setting
+    `JULIA_DEPOT_PATH` *replaces* the whole list — dropping `<BINDIR>/../share/julia` would
+    force a from-source recompile of the shipped stdlib caches — and the trailing-separator
+    "append the defaults" syntax does not exist before Julia 1.10.
+    """
+    function isolated_depot_env(version::AbstractString)
+        lock(_HELPER_LOCK) do
+            get!(_DEPOT_ENVS, version) do
+                root = get(ENV, "TIC_TEST_DEPOT_ROOT", joinpath(homedir(), ".julia", "tic-test-depots"))
+                private = joinpath(root, "v$(version)")
+                mkpath(private)
+
+                sep = Sys.iswindows() ? ";" : ":"
+                code = "print(join(DEPOT_PATH, Sys.iswindows() ? \";\" : \":\"))"
+                defaults = readchomp(`julia +$version --startup-file=no --history-file=no -e $code`)
+
+                Dict{String,Union{String,Nothing}}(
+                    "JULIA_DEPOT_PATH" => isempty(defaults) ? private : string(private, sep, defaults)
+                )
+            end
+        end
+    end
+
+    const _BASIC_PACKAGE = Ref{Any}(nothing)
+
+    """
+        basic_package_discovery()
+
+    Discovery result for `testdata/BasicPackage`, memoized. Rediscovering per version would
+    spin up a fresh `JuliaWorkspaces` workspace for every one of the per-version test items
+    that share a worker, which is pure overhead — the input never changes.
+    """
+    function basic_package_discovery()
+        lock(_HELPER_LOCK) do
+            cached = _BASIC_PACKAGE[]
+            cached === nothing || return cached
+
+            discovered = discover_test_items(joinpath(TESTDATA_DIR, "BasicPackage"))
+            _BASIC_PACKAGE[] = discovered
+            return discovered
+        end
+    end
+
+    """
+        check_julia_version(version)
+
+    Run the four canonical `BasicPackage` test items under the given juliaup channel and assert
+    the expected pass/fail/error breakdown. Shared by the per-version `:comprehensive_platform`
+    test items.
+    """
+    function check_julia_version(version::AbstractString)
+        # 1.4 does not run on macOS.
+        Sys.isapple() && version == "1.4" && return
+
+        version in installed_juliaup_channels() ||
+            error("Julia $version is not installed. Install it with: juliaup add $version")
+
+        discovered = basic_package_discovery()
+
+        target_labels = ("add works", "greet works", "failing test", "erroring test")
+        items = filter(i -> i.label in target_labels, discovered.items)
+        @test length(items) == 4
+
+        result = run_testrun(
+            items, discovered.setups, discovered;
+            julia_cmd="julia",
+            julia_args=["+$version"],
+            timeout=600,
+            env=isolated_depot_env(version)
+        )
+
+        passed_events = filter(e -> e.event == :passed, result.events)
+        failed_events = filter(e -> e.event == :failed, result.events)
+        errored_events = filter(e -> e.event == :errored, result.events)
+        skipped_events = filter(e -> e.event == :skipped, result.events)
+
+        @test length(passed_events) == 2
+        @test length(failed_events) == 1
+        @test length(failed_events[1].messages) >= 1
+        @test length(errored_events) == 1
+        @test length(errored_events[1].messages) >= 1
+        @test occursin("intentional error", errored_events[1].messages[1].message)
+        @test length(skipped_events) == 0
+
+        return
+    end
 
     """
         timed_wait(task, timeout_secs; label="task")
@@ -125,13 +263,13 @@
         )
     end
 
-    function make_test_environment(; mode="Run", julia_cmd=joinpath(Sys.BINDIR, "julia"), julia_args=String[], package_name="", package_uri="", project_uri=nothing, env_content_hash=nothing)
+    function make_test_environment(; mode="Run", julia_cmd=joinpath(Sys.BINDIR, "julia"), julia_args=String[], env=Dict{String,Union{String,Nothing}}(), package_name="", package_uri="", project_uri=nothing, env_content_hash=nothing)
         TestEnvironment(
             "test-env-1",
             julia_cmd,
             julia_args,
             nothing,
-            Dict{String,Union{String,Nothing}}(),
+            env,
             mode,
             package_name,
             package_uri,
@@ -159,7 +297,7 @@
     # the second run gets the pooled, already-warm test process of the first. `runs` in the
     # returned value holds the per-run events and output; `events`/`outputs` are the union
     # across runs, which is what a single-run caller wants.
-    function run_testrun(items, setups; mode="Run", max_procs=1, timeout=300, coverage_root_uris=nothing, log_level=:Debug, julia_cmd=joinpath(Sys.BINDIR, "julia"), julia_args=String[], item_timeouts=Dict{String,Float64}(), package_name="", package_uri="", project_uri=nothing, env_content_hash=nothing, n_runs=1, gc_between_testitems=nothing, memory_threshold=nothing)
+    function run_testrun(items, setups; mode="Run", max_procs=1, timeout=300, coverage_root_uris=nothing, log_level=:Debug, julia_cmd=joinpath(Sys.BINDIR, "julia"), julia_args=String[], env=Dict{String,Union{String,Nothing}}(), item_timeouts=Dict{String,Float64}(), package_name="", package_uri="", project_uri=nothing, env_content_hash=nothing, n_runs=1, gc_between_testitems=nothing, memory_threshold=nothing)
         events = NamedTuple[]
         events_lock = ReentrantLock()
         push_event!(e) = lock(events_lock) do
@@ -194,7 +332,7 @@
         )
 
         controller = TestItemController(callbacks; log_level=log_level)
-        test_env = make_test_environment(; mode=mode, julia_cmd=julia_cmd, julia_args=julia_args, package_name=package_name, package_uri=package_uri, project_uri=project_uri, env_content_hash=env_content_hash)
+        test_env = make_test_environment(; mode=mode, julia_cmd=julia_cmd, julia_args=julia_args, env=env, package_name=package_name, package_uri=package_uri, project_uri=project_uri, env_content_hash=env_content_hash)
 
         # Build work units from items
         work_units = [TestRunItem(item.id, test_env.id, get(item_timeouts, item.id, nothing), log_level) for item in items]
