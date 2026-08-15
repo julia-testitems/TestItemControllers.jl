@@ -1085,7 +1085,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
     if msg.skip_remaining
         @info "Test process '$(terminated_proc_id)' terminated by user, erroring $(length(items_to_redistribute)) remaining item(s)"
         for testitem_id in items_to_redistribute
-            item = get(tr.test_items, testitem_id, nothing)
+            item = get(tr.test_items, (testitem_id, terminated_env.package_uri), nothing)
             work_key = (testitem_id, test_env_id)
             if haskey(tr.remaining_work, work_key) && item !== nothing
                 delete!(tr.remaining_work, work_key)
@@ -1187,7 +1187,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
             # True startup crash — process never ran any item. Error all queued items.
             @info "Test process '$(terminated_proc_id)' crashed during startup, erroring $(length(items_to_redistribute)) queued item(s)"
             for testitem_id in items_to_redistribute
-                item = get(tr.test_items, testitem_id, nothing)
+                item = get(tr.test_items, (testitem_id, terminated_env.package_uri), nothing)
                 work_key = (testitem_id, test_env_id)
                 if haskey(tr.remaining_work, work_key) && item !== nothing
                     delete!(tr.remaining_work, work_key)
@@ -1218,7 +1218,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
             # was received — no item ever began executing. Error all queued items.
             @info "Test process '$(terminated_proc_id)' crashed before starting any test item, erroring $(length(items_to_redistribute)) queued item(s)"
             for testitem_id in items_to_redistribute
-                item = get(tr.test_items, testitem_id, nothing)
+                item = get(tr.test_items, (testitem_id, terminated_env.package_uri), nothing)
                 work_key = (testitem_id, test_env_id)
                 if haskey(tr.remaining_work, work_key) && item !== nothing
                     delete!(tr.remaining_work, work_key)
@@ -1367,7 +1367,7 @@ function handle!(c::TestItemController, msg::TestItemTimeoutMsg)
     # Resolve test_env_id
     test_env_id = _resolve_test_env_id(tr, ps.env)
 
-    item = get(tr.test_items, msg.testitem_id, nothing)
+    item = get(tr.test_items, (msg.testitem_id, ps.env.package_uri), nothing)
     work_key = (msg.testitem_id, test_env_id)
     wu = get(tr.remaining_work, work_key, nothing)
     item_label = item !== nothing ? item.label : msg.testitem_id
@@ -1617,7 +1617,7 @@ function handle!(c::TestItemController, msg::ActivationFailedMsg)
         # Error all collected items
         for testitem_id in items_to_error
             work_key = (testitem_id, test_env_id)
-            item = get(tr.test_items, testitem_id, nothing)
+            item = get(tr.test_items, (testitem_id, ps.env.package_uri), nothing)
             if haskey(tr.remaining_work, work_key) && item !== nothing
                 delete!(tr.remaining_work, work_key)
                 push!(tr.reported_items, testitem_id)
@@ -1659,7 +1659,7 @@ function handle!(c::TestItemController, msg::ActivationFailedMsg)
         if haskey(tr.testitem_ids_by_proc, ps.id)
             for testitem_id in tr.testitem_ids_by_proc[ps.id]
                 work_key = (testitem_id, test_env_id)
-                item = get(tr.test_items, testitem_id, nothing)
+                item = get(tr.test_items, (testitem_id, ps.env.package_uri), nothing)
                 if haskey(tr.remaining_work, work_key) && item !== nothing
                     delete!(tr.remaining_work, work_key)
                     push!(tr.reported_items, testitem_id)
@@ -2324,7 +2324,7 @@ reported as completed while one item was still "running".
 Diagnostic only — it reports nothing to callbacks and changes no state.
 """
 function _check_all_items_reported(tr::TestRunState)
-    unreported = [id for id in keys(tr.test_items) if id ∉ tr.reported_items]
+    unreported = [k[1] for k in keys(tr.test_items) if k[1] ∉ tr.reported_items]
     if !isempty(unreported)
         @error "Test run '$(tr.id)' is completing with $(length(unreported)) test item(s) that never produced a result. Consumers will show them as still running." unreported=sort(unreported)
     end
@@ -2338,7 +2338,13 @@ function _get_unchunked_items(tr::TestRunState, env::ProcessEnv)
         union!(assigned, ids)
     end
     test_env_id = _resolve_test_env_id(tr, env)
-    items = [id for (id, _) in tr.test_items if haskey(tr.remaining_work, (id, test_env_id)) && id ∉ assigned]
+    # Restricted to this env's package: with the same package checked out twice, both
+    # checkouts' items share an id, and only the ones belonging to this process's checkout
+    # may be handed to it.
+    items = [k[1] for (k, _) in tr.test_items
+             if k[2] == env.package_uri &&
+                haskey(tr.remaining_work, (k[1], test_env_id)) &&
+                k[1] ∉ assigned]
     return items
 end
 
