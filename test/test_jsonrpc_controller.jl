@@ -557,7 +557,9 @@ end
 
     # Wait for the slow test item to actually start running before we terminate
     process_id = Ref{Union{Nothing,String}}(nothing)
-    deadline = time() + 120
+    # Generous, because this waits on a real test process launching and precompiling, and the
+    # slowest CI legs are emulated. The point of the deadline is to fail rather than hang.
+    deadline = time() + 300
     while time() < deadline
         lock(notif_lock) do
             started = filter(n -> n.method == "testItemStarted", notifications)
@@ -573,6 +575,13 @@ end
         sleep(0.5)
     end
     @test process_id[] !== nothing
+    # Without this the test carried on and built the request with `testProcessId=nothing`,
+    # so a process that simply never started was reported as a TypeError from the protocol
+    # layer — hiding the assertion above, which is the actual finding.
+    if process_id[] === nothing
+        shutdown(jr_controller.controller)
+        return
+    end
 
     # Terminate the test process
     JSONRPC.send(
