@@ -90,7 +90,12 @@ mutable struct TestRunState
     test_environments::Vector{TestEnvironment}
     env_by_id::Dict{String,TestEnvironment}
     remaining_work::Dict{Tuple{String,String},TestRunItem}  # (testitem_id, test_env_id) → work unit
-    test_items::Dict{String,TestItemDetail}                 # lookup by testitem_id
+    # Keyed by `(testitem_id, package_uri)`, not by id alone. A test item id is scoped to
+    # its package, so the same package checked out into two folders — two worktrees, a
+    # vendored copy beside a dev checkout — mints the same id from both. Keying on the id
+    # alone collapsed them into one entry, and the surviving entry's source then ran twice
+    # while the other item silently never ran at all.
+    test_items::Dict{Tuple{String,String},TestItemDetail}
     test_setups::Vector{TestSetupDetail}
     max_processes::Int
     coverage_root_uris::Union{Nothing,Vector{String}}
@@ -134,7 +139,7 @@ function TestRunState(
         test_environments,
         env_by_id,
         Dict{Tuple{String,String},TestRunItem}((wu.testitem_id, wu.test_env_id) => wu for wu in work_units),
-        Dict{String,TestItemDetail}(item.id => item for item in items),
+        Dict{Tuple{String,String},TestItemDetail}((item.id, item.package_uri) => item for item in items),
         test_setups,
         max_processes,
         coverage_root_uris,

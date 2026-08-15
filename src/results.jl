@@ -137,11 +137,28 @@ end
 
 One test item with its per-profile outcomes. Results of the same item from
 several profiles or matrix legs are merged by `(name, uri)`.
+
+# Fields
+- `name::String` — the test item's label.
+- `uri::String` — file URI the item is defined in.
+- `profiles::Vector{TestrunResultTestitemProfile}` — outcome per run profile.
+- `id::String` — the discovery id, `<Package>@<uuid8>/<relpath>::<label>`. Scoped to the
+  package, so it is identical between a dev checkout and a CI runner — and, for the same
+  reason, identical for two checkouts of the same package. `uri` is what separates those.
+  Empty when the producer did not record one.
 """
 struct TestrunResultTestitem
     name::String
     uri::String
     profiles::Vector{TestrunResultTestitemProfile}
+    id::String
+
+    # `id` is trailing and defaulted so existing positional callers keep working, and so a
+    # results file written before this field existed still reads. Empty means "not recorded";
+    # consumers that need an id fall back to deriving one, as the JUnit writer does.
+    function TestrunResultTestitem(name, uri, profiles, id="")
+        return new(name, uri, profiles, id)
+    end
 end
 
 """
@@ -241,6 +258,7 @@ _testitem(d) = TestrunResultTestitem(
     d["name"],
     d["uri"],
     TestrunResultTestitemProfile[_profile(p) for p in d["profiles"]],
+    something(_get(d, "id"), ""),
 )
 
 _definition_error(d) = TestrunResultDefinitionError(d["message"], d["uri"], d["line"], d["column"])

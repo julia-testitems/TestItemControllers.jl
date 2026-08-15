@@ -78,6 +78,14 @@ function _relative_path(uri::AbstractString, root::Union{Nothing,AbstractString}
 
     if root !== nothing
         root_path = startswith(root, "file:") ? something(uri2filepath(root), root) : root
+        # `relpath` does not resolve a relative start path against the working directory, so
+        # a caller passing `testdata/Pkg` would get a `..`-heavy result, fail the guard below
+        # and silently fall back to absolute machine paths in every `classname`.
+        root_path = try
+            abspath(root_path)
+        catch
+            root_path
+        end
         rel = try
             relpath(path, root_path)
         catch
@@ -93,10 +101,17 @@ function _relative_path(uri::AbstractString, root::Union{Nothing,AbstractString}
     return replace(path, '\\' => '/')
 end
 
-# The stable test item id, reconstructed the same way discovery builds it: the file path
-# relative to the package root, then the label. `TestrunResult` deliberately does not carry
-# the id — it is a function of the two fields it does carry.
-_testitem_id(item::TestrunResultTestitem, root) = string(_relative_path(item.uri, root), "::", item.name)
+# The discovery id, as recorded by whoever produced the result.
+#
+# This used to be reconstructed from `(uri, root)` and the name. That was wrong twice over:
+# it assumed `root` was the item's package root when callers pass the *run* root, which in a
+# multi-package run is neither; and the id now carries a package qualifier that cannot be
+# recovered from a path at all. The fallback survives only for result files written before
+# `id` was recorded, and reproduces the old — approximate — behaviour for those.
+function _testitem_id(item::TestrunResultTestitem, root)
+    isempty(item.id) || return item.id
+    return string(_relative_path(item.uri, root), "::", item.name)
+end
 
 _junit_seconds(duration::Union{Nothing,Float64}) = duration === nothing ? 0.0 : duration / 1000
 

@@ -225,3 +225,63 @@ end
     @test ps.loaded_setups[("file:///mypkg", "MySetup")].output == "hello"
     @test ps.loaded_setups[("file:///mypkg", "MySetup")].duration == 12.0
 end
+
+@testitem "Stale setup cache is dropped when a run redefines or removes a setup" begin
+    using TestItemControllers: TestProcessState, ProcessEnv, _setup_testrun_on_process!,
+        TestItemServerProtocol
+
+    env = ProcessEnv(
+        "file:///project", "file:///package", "MyPkg", "julia", String[], nothing, "Run",
+        Dict{String,Union{String,Nothing}}()
+    )
+    ps = TestProcessState("proc-1", env)
+
+    setup(name, code) = TestItemServerProtocol.TestsetupDetails(
+        packageUri = "file:///package", name = name, kind = "module",
+        uri = "file:///package/test/setups.jl", line = 1, column = 1, code = code,
+    )
+
+    unchanged = setup("Unchanged", "const X = 1")
+    edited_before = setup("Edited", "const Y = 1")
+    dropped = setup("Dropped", "const Z = 1")
+
+    # First run: three setups ship, and the process reports having evaluated all of them.
+    _setup_testrun_on_process!(ps, "run-1", [unchanged, edited_before, dropped], nothing, :Info, nothing)
+    for n in ("Unchanged", "Edited", "Dropped")
+        ps.loaded_setups[("file:///package", n)] = (output = "", duration = 100.0)
+    end
+
+    # Second run: one setup is untouched, one has new code, one is gone entirely.
+    _setup_testrun_on_process!(ps, "run-2", [unchanged, setup("Edited", "const Y = 2")], nothing, :Info, nothing)
+
+    # The untouched setup is still warm on this process, so its measured cost still applies.
+    @test haskey(ps.loaded_setups, ("file:///package", "Unchanged"))
+    # The edited one will be re-evaluated by the test process; the old cost no longer
+    # describes it, and keeping it would let the scheduler price affinity it cannot deliver.
+    @test !haskey(ps.loaded_setups, ("file:///package", "Edited"))
+    @test !haskey(ps.loaded_setups, ("file:///package", "Dropped"))
+end
+
+@testitem "Setup cache survives a run that ships identical setups" begin
+    using TestItemControllers: TestProcessState, ProcessEnv, _setup_testrun_on_process!,
+        TestItemServerProtocol
+
+    env = ProcessEnv(
+        "file:///project", "file:///package", "MyPkg", "julia", String[], nothing, "Run",
+        Dict{String,Union{String,Nothing}}()
+    )
+    ps = TestProcessState("proc-1", env)
+
+    s = TestItemServerProtocol.TestsetupDetails(
+        packageUri = "file:///package", name = "Warm", kind = "module",
+        uri = "file:///package/test/setups.jl", line = 1, column = 1, code = "const X = 1",
+    )
+
+    _setup_testrun_on_process!(ps, "run-1", [s], nothing, :Info, nothing)
+    ps.loaded_setups[("file:///package", "Warm")] = (output = "hi", duration = 250.0)
+    _setup_testrun_on_process!(ps, "run-2", [s], nothing, :Info, nothing)
+
+    # The whole point of pooling: an unchanged setup stays warm across runs and costs
+    # nothing to reuse, which is what the scheduler's affinity model is built on.
+    @test ps.loaded_setups[("file:///package", "Warm")].duration == 250.0
+end

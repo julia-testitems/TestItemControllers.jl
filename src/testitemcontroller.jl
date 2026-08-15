@@ -505,7 +505,7 @@ function handle!(c::TestItemController, msg::ProcsAcquiredMsg)
     for pid in tr.processes_ready_before_acquired
         if haskey(tr.testitem_ids_by_proc, pid) && haskey(c.test_processes, pid)
             ps = c.test_processes[pid]
-            items_for_proc = [tr.test_items[id] for id in tr.testitem_ids_by_proc[pid] if haskey(tr.test_items, id)]
+            items_for_proc = _items_for(tr, ps.env.package_uri, tr.testitem_ids_by_proc[pid])
             @debug "Dispatching buffered test items to ready process" testrun_id=msg.testrun_id process_id=pid assigned=length(items_for_proc)
             if state(ps.fsm) == ProcessReadyToRun
                 transition!(ps.fsm, ProcessRunning; reason="dispatching buffered items")
@@ -575,7 +575,7 @@ function handle!(c::TestItemController, msg::ReadyToRunTestItemsMsg)
 
     if state(tr.fsm) == TestRunProcsAcquired || state(tr.fsm) == TestRunRunning
         @info "Test process '$(msg.testprocess_id)' is ready, dispatching test items"
-        items_for_proc = [tr.test_items[id] for id in get(tr.testitem_ids_by_proc, msg.testprocess_id, String[]) if haskey(tr.test_items, id)]
+        items_for_proc = _items_for(tr, ps.env.package_uri, get(tr.testitem_ids_by_proc, msg.testprocess_id, String[]))
         if state(ps.fsm) == ProcessReadyToRun
             transition!(ps.fsm, ProcessRunning; reason="dispatching items")
         end
@@ -1148,7 +1148,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
     crashed_work_key = crashed_item_id !== nothing ? (crashed_item_id, test_env_id) : nothing
     if crashed_item_id !== nothing && haskey(tr.remaining_work, crashed_work_key)
         # A test item was actively running when the process crashed — error it immediately.
-        item = tr.test_items[crashed_item_id]
+        item = tr.test_items[(crashed_item_id, terminated_env.package_uri)]
         delete!(tr.remaining_work, crashed_work_key)
         filter!(!isequal(crashed_item_id), items_to_redistribute)
         _cancel_timeout!(ps)
@@ -1279,7 +1279,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
         rps = c.test_processes[recipient_pid]
         append!(get!(tr.testitem_ids_by_proc, recipient_pid, String[]), items_to_redistribute)
 
-        items_to_run = [tr.test_items[id] for id in items_to_redistribute if haskey(tr.test_items, id)]
+        items_to_run = _items_for(tr, terminated_env.package_uri, items_to_redistribute)
         @info "Redistributing $(length(items_to_run)) item(s) to existing process '$(recipient_pid)'"
         _send_run_testitems!(c, rps, items_to_run)
     else
@@ -1878,7 +1878,65 @@ function _clear_testrun_on_process!(ps::TestProcessState)
     ps.has_started_items = false
 end
 
+# Drop cached setup state that the incoming run invalidates.
+#
+# `ps.loaded_setups` records what a `@testmodule`/`@testsnippet` cost and printed on this
+# process. The test process re-evaluates a setup whose code changed, so a cost measured
+# against the old body no longer describes it — and the scheduler would go on pricing warm
+# affinity for a setup this process can no longer reproduce.
+#
+# Called for every run on a pooled process, which is what makes it cover the Revise case
+# too: revised source reaches the process as changed setup code here, not through a separate
+# path. Deliberately conservative — a setup cached under an earlier run that this one does
+# not mention is dropped rather than assumed intact. Losing a cost hint only costs us a
+# scheduling opportunity; keeping a wrong one produces a worse schedule and hides why.
+function _invalidate_stale_setups!(ps::TestProcessState, new_setups)
+    isempty(ps.loaded_setups) && return nothing
+
+    previous = ps.test_setups === nothing ? Dict{Tuple{String,String},String}() :
+        Dict((i.packageUri, i.name) => i.code for i in ps.test_setups)
+    incoming = new_setups === nothing ? Dict{Tuple{String,String},String}() :
+        Dict((i.packageUri, i.name) => i.code for i in new_setups)
+
+    filter!(ps.loaded_setups) do (key, _)
+        haskey(incoming, key) && get(previous, key, nothing) == incoming[key]
+    end
+    return nothing
+end
+
+# Every test item in a run must be individually addressable, or the run silently loses one:
+# the state dicts are keyed by `(id, package_uri)`, so a genuine duplicate would overwrite its
+# twin and that item would never run, never report, and never appear in the results.
+#
+# Two items sharing an *id* is legitimate and must not error — that is the same package
+# checked out twice, which the package_uri separates. What cannot happen is a collision on
+# the full key, since discovery already suffixes duplicate labels within a file with `#N`.
+# So this should never fire; it exists so that a future mistake in the id scheme surfaces as
+# an error here rather than as a test that quietly stopped running.
+function _assert_addressable_items(test_items::Vector{TestItemDetail})
+    seen = Dict{Tuple{String,String},TestItemDetail}()
+    for item in test_items
+        key = (item.id, item.package_uri)
+        previous = get(seen, key, nothing)
+        if previous !== nothing
+            throw(ArgumentError(
+                "Two test items in this run share the id '$(item.id)' within the same package " *
+                "('$(item.package_uri)'), so one of them could not be run or reported. " *
+                "First at $(previous.uri):$(previous.line), second at $(item.uri):$(item.line)."))
+        end
+        seen[key] = item
+    end
+    return nothing
+end
+
+# Test item details, looked up for the package a given process is running. Ids are scoped to
+# their package, so the id alone does not identify an item when the same package is checked
+# out twice in one workspace — see the `test_items` field comment in `state.jl`.
+_items_for(tr::TestRunState, package_uri::AbstractString, ids) =
+    TestItemDetail[tr.test_items[(id, package_uri)] for id in ids if haskey(tr.test_items, (id, package_uri))]
+
 function _setup_testrun_on_process!(ps::TestProcessState, testrun_id::String, test_setups, coverage_root_uris, log_level::Symbol, testrun_token)
+    _invalidate_stale_setups!(ps, test_setups)
     ps.testrun_id = testrun_id
     ps.testrun_token = testrun_token
     ps.test_setups = test_setups
@@ -2372,7 +2430,7 @@ function _check_stealing!(c::TestItemController, tr::TestRunState, finished_proc
     end
 
     # Send items to thief
-    items_to_run = [tr.test_items[id] for id in testitem_ids_to_steal if haskey(tr.test_items, id)]
+    items_to_run = _items_for(tr, ps.env.package_uri, testitem_ids_to_steal)
     _send_run_testitems!(c, ps, items_to_run)
     return
 end
@@ -2457,6 +2515,8 @@ function execute_testrun(
     memory_threshold::Union{Nothing,Float64}=nothing)
 
     @info "Creating new test run '$(testrun_id)' with $(length(test_items)) test item(s) and $(length(test_environments)) environment(s)"
+
+    _assert_addressable_items(test_items)
 
     # Build TestRunState
     tr = TestRunState(
