@@ -1085,7 +1085,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
     if msg.skip_remaining
         @info "Test process '$(terminated_proc_id)' terminated by user, erroring $(length(items_to_redistribute)) remaining item(s)"
         for testitem_id in items_to_redistribute
-            item = get(tr.test_items, (testitem_id, terminated_env.package_uri), nothing)
+            item = _item_for_env(tr, terminated_env, testitem_id)
             work_key = (testitem_id, test_env_id)
             if haskey(tr.remaining_work, work_key) && item !== nothing
                 delete!(tr.remaining_work, work_key)
@@ -1148,17 +1148,21 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
     crashed_work_key = crashed_item_id !== nothing ? (crashed_item_id, test_env_id) : nothing
     if crashed_item_id !== nothing && haskey(tr.remaining_work, crashed_work_key)
         # A test item was actively running when the process crashed — error it immediately.
-        item = tr.test_items[(crashed_item_id, terminated_env.package_uri)]
+        item = _item_for_env(tr, terminated_env, crashed_item_id)
+        # The details are only needed to describe the crash; the item must be reported as
+        # errored either way, so fall back to its id rather than letting a lookup miss
+        # decide whether a test run completes.
+        item_label = item === nothing ? crashed_item_id : item.label
         delete!(tr.remaining_work, crashed_work_key)
         filter!(!isequal(crashed_item_id), items_to_redistribute)
         _cancel_timeout!(ps)
         exit_info = ps !== nothing ? _exit_info_string(ps.last_exit_code, ps.last_term_signal) : nothing
         crash_detail = exit_info !== nothing ? " ($exit_info)" : ""
-        @info "Test process '$(terminated_proc_id)' crashed$(crash_detail) while running test item '$(item.label)', erroring it immediately"
+        @info "Test process '$(terminated_proc_id)' crashed$(crash_detail) while running test item '$(item_label)', erroring it immediately"
         error_message = if exit_info !== nothing
-            "Test process crashed with $exit_info while running test item '$(item.label)'"
+            "Test process crashed with $exit_info while running test item '$(item_label)'"
         else
-            "Test process crashed while running test item '$(item.label)'"
+            "Test process crashed while running test item '$(item_label)'"
         end
         push!(tr.reported_items, crashed_item_id)
         _notify_testitem_errored(c.callbacks,
@@ -1170,9 +1174,9 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
                     error_message,
                     nothing,
                     nothing,
-                    item.uri,
-                    item.line,
-                    item.column,
+                    item === nothing ? "" : item.uri,
+                    item === nothing ? 0 : item.line,
+                    item === nothing ? 0 : item.column,
                     nothing
                 )
             ],
@@ -1187,7 +1191,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
             # True startup crash — process never ran any item. Error all queued items.
             @info "Test process '$(terminated_proc_id)' crashed during startup, erroring $(length(items_to_redistribute)) queued item(s)"
             for testitem_id in items_to_redistribute
-                item = get(tr.test_items, (testitem_id, terminated_env.package_uri), nothing)
+                item = _item_for_env(tr, terminated_env, testitem_id)
                 work_key = (testitem_id, test_env_id)
                 if haskey(tr.remaining_work, work_key) && item !== nothing
                     delete!(tr.remaining_work, work_key)
@@ -1218,7 +1222,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
             # was received — no item ever began executing. Error all queued items.
             @info "Test process '$(terminated_proc_id)' crashed before starting any test item, erroring $(length(items_to_redistribute)) queued item(s)"
             for testitem_id in items_to_redistribute
-                item = get(tr.test_items, (testitem_id, terminated_env.package_uri), nothing)
+                item = _item_for_env(tr, terminated_env, testitem_id)
                 work_key = (testitem_id, test_env_id)
                 if haskey(tr.remaining_work, work_key) && item !== nothing
                     delete!(tr.remaining_work, work_key)
@@ -1932,6 +1936,18 @@ end
 # Test item details, looked up for the package a given process is running. Ids are scoped to
 # their package, so the id alone does not identify an item when the same package is checked
 # out twice in one workspace — see the `test_items` field comment in `state.jl`.
+# One test item's details for the environment a process belongs to, or `nothing`.
+#
+# Returns `nothing` rather than throwing on a miss, and tolerates an unknown environment.
+# Both matter here: these lookups run on the process-termination path, and an exception
+# thrown out of a reactor handler does not surface as a failed test item — it kills the
+# reactor loop, so the run never completes and the caller waits until its timeout. A missing
+# detail should degrade to a generic message, not a hang.
+function _item_for_env(tr::TestRunState, env, testitem_id::AbstractString)
+    env === nothing && return nothing
+    return get(tr.test_items, (testitem_id, env.package_uri), nothing)
+end
+
 _items_for(tr::TestRunState, package_uri::AbstractString, ids) =
     TestItemDetail[tr.test_items[(id, package_uri)] for id in ids if haskey(tr.test_items, (id, package_uri))]
 
