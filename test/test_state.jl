@@ -99,7 +99,9 @@ end
     @test length(rs.remaining_work) == 2
     @test haskey(rs.remaining_work, ("item-1", "env-1"))
     @test haskey(rs.remaining_work, ("item-2", "env-1"))
-    @test rs.test_items["item-1"].label == "test1"
+    # Keyed by `(id, package_uri)`: an id alone does not identify an item when the same
+    # package is checked out into two folders of one workspace.
+    @test rs.test_items[("item-1", "file:///pkg")].label == "test1"
     @test isempty(rs.test_setups)
     @test rs.procs === nothing
     @test isempty(rs.testitem_ids_by_proc)
@@ -284,4 +286,52 @@ end
     # The whole point of pooling: an unchanged setup stays warm across runs and costs
     # nothing to reuse, which is what the scheduler's affinity model is built on.
     @test ps.loaded_setups[("file:///package", "Warm")].duration == 250.0
+end
+
+@testitem "Two checkouts of one package keep their own test items" begin
+    using TestItemControllers: TestRunState, TestEnvironment, TestItemDetail, TestRunItem,
+        TestSetupDetail
+
+    # Ids are scoped to their package, so two worktrees of the same package mint the same id.
+    # Keyed by id alone these collapsed into one entry, and the survivor's source then ran
+    # twice while the other item never ran at all.
+    id = "MyPkg@a1b2c3d4/test/a.jl::shared"
+    envs = [
+        TestEnvironment("env-a", "julia", String[], nothing, Dict{String,Union{String,Nothing}}(),
+            "Run", "MyPkg", "file:///wt/a", nothing, nothing),
+        TestEnvironment("env-b", "julia", String[], nothing, Dict{String,Union{String,Nothing}}(),
+            "Run", "MyPkg", "file:///wt/b", nothing, nothing),
+    ]
+    items = [
+        TestItemDetail(id, "file:///wt/a/test/a.jl", "shared", "MyPkg", "file:///wt/a",
+            true, String[], 1, 1, "@test true", 1, 1),
+        TestItemDetail(id, "file:///wt/b/test/a.jl", "shared", "MyPkg", "file:///wt/b",
+            true, String[], 1, 1, "@test false", 1, 1),
+    ]
+    work = [TestRunItem(id, "env-a", nothing, :Info), TestRunItem(id, "env-b", nothing, :Info)]
+
+    rs = TestRunState("run-1", envs, items, work, TestSetupDetail[], 2)
+
+    @test length(rs.test_items) == 2
+    # Each checkout keeps its own source, which is the whole point.
+    @test rs.test_items[(id, "file:///wt/a")].code == "@test true"
+    @test rs.test_items[(id, "file:///wt/b")].code == "@test false"
+end
+
+@testitem "A run with two indistinguishable test items is rejected" begin
+    using TestItemControllers: TestItemDetail, _assert_addressable_items
+
+    # Should be unreachable — discovery already suffixes duplicate labels within a file with
+    # `#N`. The assertion exists so a future mistake in the id scheme surfaces here instead
+    # of as a test item that quietly stopped running.
+    items = [
+        TestItemDetail("same", "file:///pkg/test/a.jl", "one", "Pkg", "file:///pkg",
+            true, String[], 1, 1, "@test true", 1, 1),
+        TestItemDetail("same", "file:///pkg/test/a.jl", "two", "Pkg", "file:///pkg",
+            true, String[], 9, 1, "@test true", 9, 1),
+    ]
+
+    @test_throws ArgumentError _assert_addressable_items(items)
+    # Distinct packages are fine: that is two checkouts, not a duplicate.
+    @test _assert_addressable_items(items[1:1]) === nothing
 end
