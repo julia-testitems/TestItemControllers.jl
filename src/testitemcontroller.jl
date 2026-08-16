@@ -244,6 +244,20 @@ end
 function handle!(c::TestItemController, msg::TestProcessTerminatedMsg)
     @info "Test process '$(msg.testprocess_id)' terminated"
 
+    # Make sure the exit code is known before anything below classifies this termination.
+    # The process watcher records it asynchronously and normally wins, but this message can
+    # be posted from the pipe reader the instant it hits EOF — and telling a memory-recycle
+    # `exit(66)` from a crash depends on the code being here. Read it straight off the
+    # process object as the fallback; the OS has reaped the child by the time its pipe has
+    # closed, so it is available without waiting.
+    if haskey(c.test_processes, msg.testprocess_id)
+        ps = c.test_processes[msg.testprocess_id]
+        if ps.last_exit_code === nothing && ps.jl_process !== nothing && !process_running(ps.jl_process)
+            ps.last_exit_code = ps.jl_process.exitcode
+            ps.last_term_signal = ps.jl_process.termsignal
+        end
+    end
+
     # Run-level redistribution must happen BEFORE pool cleanup below, because
     # the redistribution logic still needs ps state (current_testitem_id,
     # has_started_items, fsm state, last_exit_code, ...) which lives in

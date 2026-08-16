@@ -127,16 +127,6 @@ function _thread_spec(juliaNumThreads::Union{Nothing,String})
     return "$(parts[1]),$(max(interactive, WATCHDOG_INTERACTIVE_THREADS))"
 end
 
-# `wait(p)` with a deadline. Julia's `wait(::Process)` has none, and this is called on the
-# I/O path where an unbounded wait would turn a stubborn child into a stuck controller.
-function _wait_for_exit(p::Base.Process, timeout_secs::Real)
-    deadline = time() + timeout_secs
-    while process_running(p) && time() < deadline
-        sleep(0.01)
-    end
-    return !process_running(p)
-end
-
 struct TestProcessCrashException <: Exception
     testprocess_id::String
     exitcode::Union{Int,Nothing}
@@ -406,15 +396,6 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
 
                                 dispatch_testprocess_msg(endpoint, msg, (reactor_channel, ps))
                             end
-
-                            # The pipe reached EOF, which means the process is exiting — but
-                            # not necessarily *exited*. Wait for it before reporting
-                            # termination, so the exit code recorded by the process watcher
-                            # above is in place when the reactor handles this message. That
-                            # is what lets a memory-recycle `exit(66)` be told apart from a
-                            # crash. Bounded, because a process that closes its pipe and
-                            # then refuses to die is a hang we must not inherit.
-                            _wait_for_exit(jl_process, 10.0)
 
                             put!(reactor_channel, TestProcessTerminatedMsg(testprocess_id, ps.testrun_id, ps.skip_remaining_on_termination))
                         finally
