@@ -155,7 +155,10 @@ end
     end
 
     @info "[test] Cancel during activation: waiting for second testrun"
-    TestHelpers.timed_wait(testrun_task2, 300; label="cancel-activation-testrun2")
+    # Run 2 executes every BasicPackage item — the 60s sleeper and the crash items included —
+    # on a single process, so on a cold macOS-intel runner it genuinely approaches 300s. This
+    # wait exists to catch a hang, not to budget the run.
+    TestHelpers.timed_wait(testrun_task2, 900; label="cancel-activation-testrun2")
 
     @info "[test] Cancel during activation: shutting down"
     shutdown(controller)
