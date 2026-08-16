@@ -101,7 +101,7 @@ end
     @test haskey(rs.remaining_work, ("item-2", "env-1"))
     # Keyed by `(id, package_uri)`: an id alone does not identify an item when the same
     # package is checked out into two folders of one workspace.
-    @test rs.test_items[("item-1", "file:///pkg")].label == "test1"
+    @test rs.test_items[("item-1", "env-1")].label == "test1"
     @test isempty(rs.test_setups)
     @test rs.procs === nothing
     @test isempty(rs.testitem_ids_by_proc)
@@ -288,6 +288,37 @@ end
     @test ps.loaded_setups[("file:///package", "Warm")].duration == 250.0
 end
 
+@testitem "Items are found when the env spells the package uri differently" begin
+    using TestItemControllers: TestRunState, TestEnvironment, TestItemDetail, TestRunItem,
+        TestSetupDetail
+
+    # This is what broke CI on Windows and nowhere else. The items' package uri comes from
+    # discovery; the environment's is built straight from a path. One folder has more than
+    # one valid spelling — an 8.3 short path (`C:/Users/RUNNER~1/...` on a GitHub runner),
+    # either drive-letter case — so the two producers need not agree, and matching them by
+    # string equality found nothing: no items were assigned and the run simply never
+    # finished. It passed on Linux, which has no drive letters or short paths, and on any
+    # Windows machine whose username is short enough not to get an 8.3 alias.
+    env = TestEnvironment(
+        "env-1", "julia", String[], nothing, Dict{String,Union{String,Nothing}}(),
+        "Run", "MyPkg", "file:///C%3A/Users/RUNNER~1/AppData/Local/Temp/jl_x/pkg",
+        nothing, nothing,
+    )
+    items = [TestItemDetail(
+        "MyPkg@a1b2c3d4/test/a.jl::x",
+        "file:///c%3A/Users/runneradmin/AppData/Local/Temp/jl_x/pkg/test/a.jl",
+        "x", "MyPkg", "file:///c%3A/Users/runneradmin/AppData/Local/Temp/jl_x/pkg",
+        true, String[], 1, 1, "@test true", 1, 1,
+    )]
+    work = [TestRunItem("MyPkg@a1b2c3d4/test/a.jl::x", "env-1", nothing, :Info)]
+
+    rs = TestRunState("run-1", [env], items, work, TestSetupDetail[], 1)
+
+    # Keyed by the environment id, so the disagreeing uris never have to be compared.
+    @test length(rs.test_items) == 1
+    @test rs.test_items[("MyPkg@a1b2c3d4/test/a.jl::x", "env-1")].code == "@test true"
+end
+
 @testitem "Two checkouts of one package keep their own test items" begin
     using TestItemControllers: TestRunState, TestEnvironment, TestItemDetail, TestRunItem,
         TestSetupDetail
@@ -313,9 +344,11 @@ end
     rs = TestRunState("run-1", envs, items, work, TestSetupDetail[], 2)
 
     @test length(rs.test_items) == 2
-    # Each checkout keeps its own source, which is the whole point.
-    @test rs.test_items[(id, "file:///wt/a")].code == "@test true"
-    @test rs.test_items[(id, "file:///wt/b")].code == "@test false"
+    # Each checkout keeps its own source, which is the whole point. Disambiguating them is
+    # the one case that genuinely needs the package uri, and it is reached only when a single
+    # id names more than one item.
+    @test rs.test_items[(id, "env-a")].code == "@test true"
+    @test rs.test_items[(id, "env-b")].code == "@test false"
 end
 
 @testitem "A run with two indistinguishable test items is rejected" begin

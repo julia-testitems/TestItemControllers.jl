@@ -505,7 +505,7 @@ function handle!(c::TestItemController, msg::ProcsAcquiredMsg)
     for pid in tr.processes_ready_before_acquired
         if haskey(tr.testitem_ids_by_proc, pid) && haskey(c.test_processes, pid)
             ps = c.test_processes[pid]
-            items_for_proc = _items_for(tr, ps.env.package_uri, tr.testitem_ids_by_proc[pid])
+            items_for_proc = _items_for(tr, _resolve_test_env_id(tr, ps.env), tr.testitem_ids_by_proc[pid])
             @debug "Dispatching buffered test items to ready process" testrun_id=msg.testrun_id process_id=pid assigned=length(items_for_proc)
             if state(ps.fsm) == ProcessReadyToRun
                 transition!(ps.fsm, ProcessRunning; reason="dispatching buffered items")
@@ -575,7 +575,7 @@ function handle!(c::TestItemController, msg::ReadyToRunTestItemsMsg)
 
     if state(tr.fsm) == TestRunProcsAcquired || state(tr.fsm) == TestRunRunning
         @info "Test process '$(msg.testprocess_id)' is ready, dispatching test items"
-        items_for_proc = _items_for(tr, ps.env.package_uri, get(tr.testitem_ids_by_proc, msg.testprocess_id, String[]))
+        items_for_proc = _items_for(tr, _resolve_test_env_id(tr, ps.env), get(tr.testitem_ids_by_proc, msg.testprocess_id, String[]))
         if state(ps.fsm) == ProcessReadyToRun
             transition!(ps.fsm, ProcessRunning; reason="dispatching items")
         end
@@ -1085,7 +1085,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
     if msg.skip_remaining
         @info "Test process '$(terminated_proc_id)' terminated by user, erroring $(length(items_to_redistribute)) remaining item(s)"
         for testitem_id in items_to_redistribute
-            item = _item_for_env(tr, terminated_env, testitem_id)
+            item = _item_for_env(tr, test_env_id, testitem_id)
             work_key = (testitem_id, test_env_id)
             if haskey(tr.remaining_work, work_key) && item !== nothing
                 delete!(tr.remaining_work, work_key)
@@ -1148,7 +1148,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
     crashed_work_key = crashed_item_id !== nothing ? (crashed_item_id, test_env_id) : nothing
     if crashed_item_id !== nothing && haskey(tr.remaining_work, crashed_work_key)
         # A test item was actively running when the process crashed — error it immediately.
-        item = _item_for_env(tr, terminated_env, crashed_item_id)
+        item = _item_for_env(tr, test_env_id, crashed_item_id)
         # The details are only needed to describe the crash; the item must be reported as
         # errored either way, so fall back to its id rather than letting a lookup miss
         # decide whether a test run completes.
@@ -1191,7 +1191,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
             # True startup crash — process never ran any item. Error all queued items.
             @info "Test process '$(terminated_proc_id)' crashed during startup, erroring $(length(items_to_redistribute)) queued item(s)"
             for testitem_id in items_to_redistribute
-                item = _item_for_env(tr, terminated_env, testitem_id)
+                item = _item_for_env(tr, test_env_id, testitem_id)
                 work_key = (testitem_id, test_env_id)
                 if haskey(tr.remaining_work, work_key) && item !== nothing
                     delete!(tr.remaining_work, work_key)
@@ -1222,7 +1222,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
             # was received — no item ever began executing. Error all queued items.
             @info "Test process '$(terminated_proc_id)' crashed before starting any test item, erroring $(length(items_to_redistribute)) queued item(s)"
             for testitem_id in items_to_redistribute
-                item = _item_for_env(tr, terminated_env, testitem_id)
+                item = _item_for_env(tr, test_env_id, testitem_id)
                 work_key = (testitem_id, test_env_id)
                 if haskey(tr.remaining_work, work_key) && item !== nothing
                     delete!(tr.remaining_work, work_key)
@@ -1283,7 +1283,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
         rps = c.test_processes[recipient_pid]
         append!(get!(tr.testitem_ids_by_proc, recipient_pid, String[]), items_to_redistribute)
 
-        items_to_run = _items_for(tr, terminated_env.package_uri, items_to_redistribute)
+        items_to_run = _items_for(tr, test_env_id, items_to_redistribute)
         @info "Redistributing $(length(items_to_run)) item(s) to existing process '$(recipient_pid)'"
         _send_run_testitems!(c, rps, items_to_run)
     else
@@ -1371,7 +1371,7 @@ function handle!(c::TestItemController, msg::TestItemTimeoutMsg)
     # Resolve test_env_id
     test_env_id = _resolve_test_env_id(tr, ps.env)
 
-    item = get(tr.test_items, (msg.testitem_id, ps.env.package_uri), nothing)
+    item = _item_for_env(tr, test_env_id, msg.testitem_id)
     work_key = (msg.testitem_id, test_env_id)
     wu = get(tr.remaining_work, work_key, nothing)
     item_label = item !== nothing ? item.label : msg.testitem_id
@@ -1621,7 +1621,7 @@ function handle!(c::TestItemController, msg::ActivationFailedMsg)
         # Error all collected items
         for testitem_id in items_to_error
             work_key = (testitem_id, test_env_id)
-            item = get(tr.test_items, (testitem_id, ps.env.package_uri), nothing)
+            item = _item_for_env(tr, test_env_id, testitem_id)
             if haskey(tr.remaining_work, work_key) && item !== nothing
                 delete!(tr.remaining_work, work_key)
                 push!(tr.reported_items, testitem_id)
@@ -1663,7 +1663,7 @@ function handle!(c::TestItemController, msg::ActivationFailedMsg)
         if haskey(tr.testitem_ids_by_proc, ps.id)
             for testitem_id in tr.testitem_ids_by_proc[ps.id]
                 work_key = (testitem_id, test_env_id)
-                item = get(tr.test_items, (testitem_id, ps.env.package_uri), nothing)
+                item = _item_for_env(tr, test_env_id, testitem_id)
                 if haskey(tr.remaining_work, work_key) && item !== nothing
                     delete!(tr.remaining_work, work_key)
                     push!(tr.reported_items, testitem_id)
@@ -1943,13 +1943,13 @@ end
 # thrown out of a reactor handler does not surface as a failed test item — it kills the
 # reactor loop, so the run never completes and the caller waits until its timeout. A missing
 # detail should degrade to a generic message, not a hang.
-function _item_for_env(tr::TestRunState, env, testitem_id::AbstractString)
-    env === nothing && return nothing
-    return get(tr.test_items, (testitem_id, env.package_uri), nothing)
+function _item_for_env(tr::TestRunState, test_env_id::Union{Nothing,AbstractString}, testitem_id::AbstractString)
+    test_env_id === nothing && return nothing
+    return get(tr.test_items, (testitem_id, test_env_id), nothing)
 end
 
-_items_for(tr::TestRunState, package_uri::AbstractString, ids) =
-    TestItemDetail[tr.test_items[(id, package_uri)] for id in ids if haskey(tr.test_items, (id, package_uri))]
+_items_for(tr::TestRunState, test_env_id::AbstractString, ids) =
+    TestItemDetail[tr.test_items[(id, test_env_id)] for id in ids if haskey(tr.test_items, (id, test_env_id))]
 
 function _setup_testrun_on_process!(ps::TestProcessState, testrun_id::String, test_setups, coverage_root_uris, log_level::Symbol, testrun_token)
     _invalidate_stale_setups!(ps, test_setups)
@@ -2357,8 +2357,10 @@ function _get_unchunked_items(tr::TestRunState, env::ProcessEnv)
     # Restricted to this env's package: with the same package checked out twice, both
     # checkouts' items share an id, and only the ones belonging to this process's checkout
     # may be handed to it.
+    # No package comparison here: `test_items` is keyed by env, and `remaining_work` is too,
+    # so both already scope to this environment.
     items = [k[1] for (k, _) in tr.test_items
-             if k[2] == env.package_uri &&
+             if k[2] == test_env_id &&
                 haskey(tr.remaining_work, (k[1], test_env_id)) &&
                 k[1] ∉ assigned]
     return items
@@ -2452,7 +2454,7 @@ function _check_stealing!(c::TestItemController, tr::TestRunState, finished_proc
     end
 
     # Send items to thief
-    items_to_run = _items_for(tr, ps.env.package_uri, testitem_ids_to_steal)
+    items_to_run = _items_for(tr, _resolve_test_env_id(tr, ps.env), testitem_ids_to_steal)
     _send_run_testitems!(c, ps, items_to_run)
     return
 end

@@ -280,9 +280,10 @@ function _assign_items_to_procs!(c::TestItemController, tr::TestRunState, env::P
     isempty(unassigned) && return nothing
 
     all_env_items = _get_unchunked_items(tr, env)
+    test_env_id = _resolve_test_env_id(tr, env)
 
     # The scheduling caches are keyed by test item id alone; `tr.test_items` is keyed by
-    # `(id, package_uri)`, so project it back down before pruning against it.
+    # `(id, test_env_id)`, so project it back down before pruning against it.
     _prune_scheduling_cache!(c, (k[1] for k in keys(tr.test_items)))
 
     if c.schedule !== :duration || isempty(all_env_items) || !_has_scheduling_history(c, all_env_items)
@@ -298,7 +299,7 @@ function _assign_items_to_procs!(c::TestItemController, tr::TestRunState, env::P
 
     items = ScheduleItem[]
     for id in all_env_items
-        d = get(tr.test_items, (id, env.package_uri), nothing)
+        d = get(tr.test_items, (id, test_env_id), nothing)
         d === nothing && continue
         setups = String[
             _setup_key(d.package_uri, n) for n in d.test_setups if (d.package_uri, n) in module_setups
