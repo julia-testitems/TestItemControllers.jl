@@ -150,7 +150,10 @@ end
         # Deliberately left on the default depot: the "Julia 1.6 platform" item in
         # test_julia_versions.jl writes to a private layered depot instead, so the two never
         # contend on the same `compiled/v1.6` cache files even when CI runs them side by side.
-        result = TestHelpers.run_testrun(items, discovered.setups, discovered; julia_cmd="julia", julia_args=["+1.6"], timeout=600)
+        result = TestHelpers.run_testrun(items, discovered.setups, discovered; julia_cmd="julia", julia_args=["+1.6"],
+            # Same reason as `check_julia_version`: launching an old Julia into a cold depot
+            # is unbounded on the 32-bit Windows runner.
+            timeout=1800)
 
         passed_events = filter(e -> e.event == :passed, result.events)
         @test length(passed_events) == 1

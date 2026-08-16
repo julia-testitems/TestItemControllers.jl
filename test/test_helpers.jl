@@ -123,7 +123,11 @@
             items, discovered.setups, discovered;
             julia_cmd="julia",
             julia_args=["+$version"],
-            timeout=600,
+            # This is dominated by juliaup fetching an old toolchain and that Julia
+            # precompiling into a fresh depot, which is unbounded on a slow runner — the
+            # 32-bit Windows leg times out at 600s. The deadline is here to catch a hang,
+            # not to hold the toolchain to a performance budget.
+            timeout=1800,
             env=isolated_depot_env(version)
         )
 
