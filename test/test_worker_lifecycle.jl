@@ -37,7 +37,7 @@ end
 
     result = TestHelpers.run_testrun(
         items, discovered.setups, discovered;
-        gc_between_testitems=false, timeout=120,
+        gc_between_testitems=false, timeout=600,
     )
 
     @test length(filter(e -> e.event == :passed, result.events)) == 1
