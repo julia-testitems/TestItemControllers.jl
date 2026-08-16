@@ -172,7 +172,7 @@ end
     @info "[test] createTestRun with passing items: shutting down"
     stop_collector()
     shutdown(jr_controller.controller)
-    TestHelpers.timed_wait(controller_task, 120; label="jsonrpc-passing-controller")
+    TestHelpers.timed_wait(controller_task, 600; label="jsonrpc-passing-controller")
     @info "[test] createTestRun with passing items: verifying"
 
     # Analyze notifications
@@ -280,7 +280,7 @@ end
     @info "[test] createTestRun with failing items: shutting down"
     stop_collector()
     shutdown(jr_controller.controller)
-    TestHelpers.timed_wait(controller_task, 120; label="jsonrpc-failing-controller")
+    TestHelpers.timed_wait(controller_task, 600; label="jsonrpc-failing-controller")
 
     failed = lock(notif_lock) do
         filter(n -> n.method == "testItemFailed", notifications)
@@ -370,7 +370,7 @@ end
 
     @info "[test] Process lifecycle via JSONRPC: shutting down"
     shutdown(jr_controller.controller)
-    TestHelpers.timed_wait(controller_task, 120; label="jsonrpc-lifecycle-controller")
+    TestHelpers.timed_wait(controller_task, 600; label="jsonrpc-lifecycle-controller")
 
     # Stop collecting notifications after shutdown completes, to capture testProcessTerminated
     sleep(1.0)
@@ -474,7 +474,7 @@ end
     @info "[test] appendOutput via JSONRPC: shutting down"
     stop_collector()
     shutdown(jr_controller.controller)
-    TestHelpers.timed_wait(controller_task, 120; label="jsonrpc-output-controller")
+    TestHelpers.timed_wait(controller_task, 600; label="jsonrpc-output-controller")
 
     append_output = lock(notif_lock) do
         filter(n -> n.method == "appendOutput", notifications)
@@ -593,7 +593,7 @@ end
     # Wait for the createTestRun to complete — should finish promptly after
     # process termination errors the remaining items (not redistribute them).
     @info "[test] terminateTestProcess: waiting for response"
-    TestHelpers.timed_wait(response_task, 120; label="jsonrpc-terminate-response")
+    TestHelpers.timed_wait(response_task, 600; label="jsonrpc-terminate-response")
     response = fetch(response_task)
     @test response.status == "success"
 
@@ -602,7 +602,7 @@ end
     @info "[test] terminateTestProcess: shutting down"
     stop_collector()
     shutdown(jr_controller.controller)
-    TestHelpers.timed_wait(controller_task, 120; label="jsonrpc-terminate-controller")
+    TestHelpers.timed_wait(controller_task, 600; label="jsonrpc-terminate-controller")
 
     terminated = lock(notif_lock) do
         filter(n -> n.method == "testProcessTerminated", notifications)

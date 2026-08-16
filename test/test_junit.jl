@@ -261,6 +261,11 @@ end
     # relative root used to produce a `..`-heavy path, fail the guard in `_relative_path`,
     # and silently emit absolute machine paths as classnames instead.
     mktempdir() do dir
+        # macOS hands out `/var/...`, a symlink to `/private/var/...`, and `cd` + `pwd`
+        # resolve it — so without this the root and the item uris spell the same folder two
+        # ways, `relpath` walks out with `..`, and the writer falls back to absolute paths.
+        # The same one-folder-two-spellings disease as Windows 8.3 names, different OS.
+        dir = realpath(dir)
         pkg = joinpath(dir, "pkg")
         mkpath(joinpath(pkg, "test"))
         item_uri = string(filepath2uri(joinpath(pkg, "test", "a.jl")))
