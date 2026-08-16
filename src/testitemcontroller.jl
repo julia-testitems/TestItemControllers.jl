@@ -163,6 +163,16 @@ end
 # ═══════════════════════════════════════════════════════════════════════════════
 
 function handle!(c::TestItemController, ::ShutdownMsg)
+    # Idempotent. A second shutdown request must be a no-op, not an FSM error: this runs on
+    # the reactor, and an exception here does not fail anything visibly — it kills the
+    # reactor loop, and every run in flight then hangs until its caller times out. That is
+    # precisely how a test-harness timeout that called `shutdown` twice turned a slow run
+    # into a wedged controller.
+    if state(c.controller_fsm) != ControllerRunning
+        @debug "Ignoring shutdown request; controller already $(state(c.controller_fsm))"
+        return state(c.controller_fsm) == ControllerStopped
+    end
+
     @info "Shutting down controller, terminating $(length(c.test_processes)) test process(es)"
     transition!(c.controller_fsm, ControllerShuttingDown; reason="shutdown requested")
 
@@ -575,7 +585,10 @@ function handle!(c::TestItemController, msg::ReadyToRunTestItemsMsg)
 
     if state(tr.fsm) == TestRunProcsAcquired || state(tr.fsm) == TestRunRunning
         @info "Test process '$(msg.testprocess_id)' is ready, dispatching test items"
-        items_for_proc = _items_for(tr, _resolve_test_env_id(tr, ps.env), get(tr.testitem_ids_by_proc, msg.testprocess_id, String[]))
+        assigned_ids = get(tr.testitem_ids_by_proc, msg.testprocess_id, String[])
+        env_id = _resolve_test_env_id(tr, ps.env)
+        items_for_proc = _items_for(tr, env_id, assigned_ids)
+        @debug "Dispatch lookup" testprocess_id=msg.testprocess_id env_id assigned=length(assigned_ids) found=length(items_for_proc)
         if state(ps.fsm) == ProcessReadyToRun
             transition!(ps.fsm, ProcessRunning; reason="dispatching items")
         end
@@ -1139,6 +1152,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
     # result was reported — so there is no in-flight item to blame, and the remaining items
     # go through the ordinary redistribute-or-respawn path below rather than being errored.
     recycled = ps !== nothing && ps.last_exit_code == MEMORY_RECYCLE_EXIT_CODE
+    @debug "Termination classification" testprocess_id=terminated_proc_id exit_code=(ps === nothing ? :no_ps : ps.last_exit_code) term_signal=(ps === nothing ? :no_ps : ps.last_term_signal) recycled
     if recycled
         @info "Test process '$(terminated_proc_id)' stopped itself to release memory, redistributing $(length(items_to_redistribute)) remaining item(s)"
         _cancel_timeout!(ps)

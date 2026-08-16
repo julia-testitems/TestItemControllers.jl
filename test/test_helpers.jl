@@ -316,6 +316,8 @@
 
         process_events = NamedTuple[]
         process_events_lock = ReentrantLock()
+        process_output = Dict{String,Vector{String}}()
+        process_output_lock = ReentrantLock()
         push_process_event!(e) = lock(process_events_lock) do
             push!(process_events, e)
         end
@@ -332,7 +334,11 @@
 
             on_process_terminated = id -> push_process_event!((event=:process_terminated, id=id)),
             on_process_status_changed = (id, status) -> push_process_event!((event=:status_changed, id=id, status=status)),
-            on_process_output = (id, output) -> nothing,
+            # Kept, and dumped on timeout. Every hang this suite has produced on CI was a
+            # black box because the test processes' own output was discarded here.
+            on_process_output = (id, output) -> lock(process_output_lock) do
+                push!(get!(Vector{String}, process_output, id), output)
+            end,
         )
 
         controller = TestItemController(callbacks; log_level=log_level)
@@ -394,6 +400,16 @@
             if timed_out[]
                 shutdown(controller)
                 wait(controller_task)
+                # Say what every test process was doing when the run stalled. Without this a
+                # timeout on CI tells you only that a run did not finish, and the worker that
+                # actually wedged leaves no trace.
+                lock(process_output_lock) do
+                    for (pid, chunks) in process_output
+                        text = join(chunks)
+                        tail = length(text) > 4000 ? text[end-4000+1:end] : text
+                        @error "Test process output at timeout" testprocess_id=pid output=tail
+                    end
+                end
                 error("run_testrun timed out after $(timeout)s")
             end
 
