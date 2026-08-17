@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking (JSONRPC):** every test item notification — `testItemStarted`, `testItemPassed`, `testItemFailed`, `testItemErrored`, `testItemSkipped` and `appendOutput` — now carries `testEnvId` alongside `testItemId`, and clients must identify an item by the pair. A test item id is scoped to its package, so the same package checked out into two folders mints the same id from both; a client keying on the id alone collapses them, reporting one item's results twice while the other never resolves. The in-process callbacks have always received `test_env_id` and `TestRunState.test_items` is already keyed this way — it was only the JSONRPC layer that dropped it.
 - Load setup modules via `using` by default ([2b187ad1](https://github.com/julia-vscode/TestItemControllers.jl/commit/2b187ad1))
 - Updated LICENSE ([2008be43](https://github.com/julia-vscode/TestItemControllers.jl/commit/2008be43))
 

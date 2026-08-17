@@ -98,7 +98,8 @@ mutable struct JSONRPCTestItemController
                 TestItemControllerProtocol.notficiationTypeTestItemStarted,
                 TestItemControllerProtocol.TestItemStartedParams(
                     testRunId=testrun_id,
-                    testItemId=testitem_id
+                    testItemId=testitem_id,
+                    testEnvId=test_env_id
                 )
             ),
             on_testitem_passed = (testrun_id, testitem_id, test_env_id, duration, perf=nothing) -> _safe_send(
@@ -106,6 +107,7 @@ mutable struct JSONRPCTestItemController
                 TestItemControllerProtocol.TestItemPassedParams(
                     testRunId=testrun_id,
                     testItemId=testitem_id,
+                    testEnvId=test_env_id,
                     duration=duration,
                     perf=_to_wire_perf(perf)
                 )
@@ -115,6 +117,7 @@ mutable struct JSONRPCTestItemController
                 TestItemControllerProtocol.TestItemFailedParams(
                     testRunId=testrun_id,
                     testItemId=testitem_id,
+                    testEnvId=test_env_id,
                     messages=_to_wire_messages(messages),
                     duration=something(duration, missing),
                     perf=_to_wire_perf(perf)
@@ -125,6 +128,7 @@ mutable struct JSONRPCTestItemController
                 TestItemControllerProtocol.TestItemErroredParams(
                     testRunId=testrun_id,
                     testItemId=testitem_id,
+                    testEnvId=test_env_id,
                     messages=_to_wire_messages(messages),
                     duration=something(duration, missing),
                     perf=_to_wire_perf(perf)
@@ -135,6 +139,7 @@ mutable struct JSONRPCTestItemController
                 TestItemControllerProtocol.TestItemSkippedParams(
                     testRunId=testrun_id,
                     testItemId=testitem_id,
+                    testEnvId=test_env_id,
                     reason=something(reason, missing)
                 )
             ),
@@ -143,6 +148,7 @@ mutable struct JSONRPCTestItemController
                 TestItemControllerProtocol.AppendOutputParams(
                     testRunId=testrun_id,
                     testItemId=something(testitem_id, missing),
+                    testEnvId=test_env_id,
                     output=output
                 )
             ),

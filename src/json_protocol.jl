@@ -100,9 +100,16 @@ end
     stackTrace::Union{Missing,Vector{TestMessageStackFrame}}
 end
 
+# Every test item notification carries `testEnvId` alongside `testItemId`, because the item id
+# alone does not identify an item. An id is scoped to its package, so the same package checked
+# out into two folders — two worktrees, a vendored copy beside a dev checkout — mints the same
+# id from both, and a client keying on the id alone collapses them: one item's results are
+# reported twice while the other never resolves. The environment id is what separates them,
+# which is how `TestRunState.test_items` and `remaining_work` are keyed on this side.
 @dict_readable struct TestItemStartedParams <: Outbound
     testRunId::String
     testItemId::String
+    testEnvId::String
 end
 
 
@@ -122,6 +129,7 @@ end
 @dict_readable struct TestItemErroredParams <: Outbound
     testRunId::String
     testItemId::String
+    testEnvId::String
     messages::Vector{TestMessage}
     duration::Union{Missing,Float64}
     perf::Union{Missing,PerfStatsParams}
@@ -131,6 +139,7 @@ const notficiationTypeTestItemErrored = NotificationType("testItemErrored", Test
 @dict_readable struct TestItemFailedParams <: Outbound
     testRunId::String
     testItemId::String
+    testEnvId::String
     messages::Vector{TestMessage}
     duration::Union{Missing,Float64}
     perf::Union{Missing,PerfStatsParams}
@@ -140,6 +149,7 @@ const notficiationTypeTestItemFailed = NotificationType("testItemFailed", TestIt
 @dict_readable struct TestItemPassedParams <: Outbound
     testRunId::String
     testItemId::String
+    testEnvId::String
     duration::Union{Missing,Float64}
     perf::Union{Missing,PerfStatsParams}
 end
@@ -149,6 +159,7 @@ const notficiationTypeTestItemPassed = NotificationType("testItemPassed", TestIt
 @dict_readable struct TestItemSkippedParams <: Outbound
     testRunId::String
     testItemId::String
+    testEnvId::String
     # Source text of the `skip` expression that evaluated to `true`, when there was one.
     reason::Union{Missing,String}
 end
@@ -158,6 +169,10 @@ const notficiationTypeTestItemSkipped = NotificationType("testItemSkipped", Test
 @dict_readable struct AppendOutputParams <: Outbound
     testRunId::String
     testItemId::Union{Missing,String}
+    # Always present, including for the process-level output that has no `testItemId`, so that
+    # a client routing output to a test item can key it the same way as the result
+    # notifications above.
+    testEnvId::String
     output::String
 end
 
