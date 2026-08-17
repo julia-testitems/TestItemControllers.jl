@@ -279,7 +279,7 @@ function _assign_items_to_procs!(c::TestItemController, tr::TestRunState, env::P
     unassigned = String[pid for pid in proc_ids if !haskey(tr.testitem_ids_by_proc, pid)]
     isempty(unassigned) && return nothing
 
-    all_env_items = _get_unchunked_items(tr, env)
+    all_env_items = _get_unchunked_items(tr, env, proc_ids)
     test_env_id = _resolve_test_env_id(tr, env)
 
     # The scheduling caches are keyed by test item id alone; `tr.test_items` is keyed by

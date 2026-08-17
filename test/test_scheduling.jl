@@ -403,6 +403,44 @@ end
     @test sort(tr.testitem_ids_by_proc["p2"]) == ["i3", "i4"]
 end
 
+@testitem "Assignment: one id in two environments is assigned in both" setup=[SchedulingHelpers] begin
+    using TestItemControllers: TestRunState, TestEnvironment, ProcessEnv, TestItemDetail,
+        TestRunItem, TestSetupDetail, _assign_items_to_procs!
+
+    # The same package checked out into two folders: both copies mint the same test item id,
+    # and each runs under its own environment. Every environment must get the id assigned to
+    # one of *its* processes. Treating a bare id as assigned because some other environment's
+    # process already holds it drops the second work unit — it is never dispatched,
+    # `remaining_work` never empties, and the run hangs instead of completing.
+    pkg_a = "file:///a/Pkg"
+    pkg_b = "file:///b/Pkg"
+    id = "Pkg@aaaaaaaa/test/runtests.jl::shared"
+
+    mkenv(env_id, pkg) = TestEnvironment(env_id, "julia", String[], nothing,
+        Dict{String,Union{String,Nothing}}(), "Normal", "Pkg", pkg, nothing, nothing, nothing)
+    mkitem(pkg) = TestItemDetail(id, "$(pkg)/test/runtests.jl", id, "Pkg", pkg, true, String[],
+        1, 1, "@test true", 1, 1)
+
+    env_a, env_b = mkenv("env-a", pkg_a), mkenv("env-b", pkg_b)
+
+    c = SchedulingHelpers.make_controller()
+    tr = TestRunState(
+        "run-1",
+        [env_a, env_b],
+        [mkitem(pkg_a), mkitem(pkg_b)],
+        [TestRunItem(id, "env-a", nothing, :Info), TestRunItem(id, "env-b", nothing, :Info)],
+        TestSetupDetail[],
+        4,
+    )
+
+    # env-b first, so that env-a is the one that used to come up empty.
+    _assign_items_to_procs!(c, tr, ProcessEnv(env_b), ["p-b"])
+    _assign_items_to_procs!(c, tr, ProcessEnv(env_a), ["p-a"])
+
+    @test tr.testitem_ids_by_proc["p-b"] == [id]
+    @test tr.testitem_ids_by_proc["p-a"] == [id]
+end
+
 @testitem "Scheduling history survives a second run in one session" setup=[TestHelpers] begin
     using TestItemControllers: TestItemController, TestRunItem, execute_testrun, shutdown,
         ControllerCallbacks

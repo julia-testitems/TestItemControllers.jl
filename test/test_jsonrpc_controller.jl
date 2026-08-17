@@ -198,12 +198,17 @@ end
     @test length(errored) == 0
     @test length(process_created) >= 1
 
-    # Verify testRunId in notifications
+    # Verify testRunId in notifications. `testEnvId` travels with every one of them because
+    # a test item id alone does not identify an item — it is scoped to its package, so two
+    # checkouts of one package mint the same id and a client keying on the id alone
+    # collapses them.
     for n in started
         @test n.params["testRunId"] == testrun_id
+        @test n.params["testEnvId"] == test_env.id
     end
     for n in passed
         @test n.params["testRunId"] == testrun_id
+        @test n.params["testEnvId"] == test_env.id
         @test haskey(n.params, "duration")
     end
 
@@ -486,6 +491,12 @@ end
     # Combine all output text
     all_output = join([n.params["output"] for n in append_output], "")
     @test occursin("hello from output test", all_output)
+
+    # `testEnvId` is present on every one, including the process-level output that carries no
+    # `testItemId`, so a client can route output the same way it routes results.
+    for n in append_output
+        @test n.params["testEnvId"] == test_env.id
+    end
 
     close(client_sock)
     close(server_sock)
