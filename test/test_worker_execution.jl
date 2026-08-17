@@ -101,10 +101,19 @@ end
     pkg_path = joinpath(TestHelpers.TESTDATA_DIR, "BasicPackage")
     discovered = TestHelpers.discover_test_items(pkg_path)
 
-    result = TestHelpers.run_testrun(discovered)
+    # One passing item is all this needs. Running the whole package dragged in the 60s
+    # sleeper and the deliberate crash items, which on a slow runner pushed the run past its
+    # timeout — leaving no passed events and turning this into a BoundsError on the indexing
+    # below rather than a readable failure.
+    items = filter(i -> i.label == "add works", discovered.items)
+    result = TestHelpers.run_testrun(items, discovered.setups, discovered)
 
     passed_events = filter(e -> e.event == :passed, result.events)
-    @test length(passed_events) > 0
+    @test length(passed_events) == 1
+    # Stop here rather than index an empty vector: the assertion above is the real signal.
+    if isempty(passed_events)
+        return
+    end
 
     perf = passed_events[1].perf
     @test perf !== nothing
@@ -141,7 +150,10 @@ end
         # Deliberately left on the default depot: the "Julia 1.6 platform" item in
         # test_julia_versions.jl writes to a private layered depot instead, so the two never
         # contend on the same `compiled/v1.6` cache files even when CI runs them side by side.
-        result = TestHelpers.run_testrun(items, discovered.setups, discovered; julia_cmd="julia", julia_args=["+1.6"], timeout=600)
+        result = TestHelpers.run_testrun(items, discovered.setups, discovered; julia_cmd="julia", julia_args=["+1.6"],
+            # Same reason as `check_julia_version`: launching an old Julia into a cold depot
+            # is unbounded on the 32-bit Windows runner.
+            timeout=1800)
 
         passed_events = filter(e -> e.event == :passed, result.events)
         @test length(passed_events) == 1

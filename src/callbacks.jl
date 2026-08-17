@@ -23,7 +23,7 @@ non-owning process reports, so consumers never see a duplicate or a status going
 The terminal callbacks take one optional trailing argument beyond what is listed above: a
 [`PerfStats`](@ref) (or `nothing`) for passed/failed/errored, and a skip reason (or
 `nothing`) for skipped. Callbacks that do not accept it keep working unchanged — the
-controller invokes them through [`_notify_testitem_passed`](@ref) and friends, which fall
+controller invokes them through its internal `_notify_testitem_*` helpers, which fall
 back to the shorter arity.
 """
 struct ControllerCallbacks{F1<:Function,F2<:Function,F3<:Function,F4<:Function,F5<:Function,F6<:Function,F7<:Function,F8<:Union{Nothing,Function},F9<:Union{Nothing,Function},F10<:Union{Nothing,Function},F11<:Union{Nothing,Function}}

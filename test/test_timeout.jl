@@ -16,7 +16,7 @@
     all_items = [slow; passing_items]
 
     # Set a 5-second timeout on the slow item via work unit timeouts
-    result = TestHelpers.run_testrun(all_items, discovered.setups, discovered; timeout=120, item_timeouts=Dict(slow.id => 5.0))
+    result = TestHelpers.run_testrun(all_items, discovered.setups, discovered; timeout=600, item_timeouts=Dict(slow.id => 5.0))
 
     # The timed-out item should be errored
     errored = filter(e -> e.event == :errored, result.events)

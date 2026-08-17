@@ -172,7 +172,7 @@ end
     @info "[test] createTestRun with passing items: shutting down"
     stop_collector()
     shutdown(jr_controller.controller)
-    TestHelpers.timed_wait(controller_task, 120; label="jsonrpc-passing-controller")
+    TestHelpers.timed_wait(controller_task, 600; label="jsonrpc-passing-controller")
     @info "[test] createTestRun with passing items: verifying"
 
     # Analyze notifications
@@ -280,7 +280,7 @@ end
     @info "[test] createTestRun with failing items: shutting down"
     stop_collector()
     shutdown(jr_controller.controller)
-    TestHelpers.timed_wait(controller_task, 120; label="jsonrpc-failing-controller")
+    TestHelpers.timed_wait(controller_task, 600; label="jsonrpc-failing-controller")
 
     failed = lock(notif_lock) do
         filter(n -> n.method == "testItemFailed", notifications)
@@ -370,7 +370,7 @@ end
 
     @info "[test] Process lifecycle via JSONRPC: shutting down"
     shutdown(jr_controller.controller)
-    TestHelpers.timed_wait(controller_task, 120; label="jsonrpc-lifecycle-controller")
+    TestHelpers.timed_wait(controller_task, 600; label="jsonrpc-lifecycle-controller")
 
     # Stop collecting notifications after shutdown completes, to capture testProcessTerminated
     sleep(1.0)
@@ -474,7 +474,7 @@ end
     @info "[test] appendOutput via JSONRPC: shutting down"
     stop_collector()
     shutdown(jr_controller.controller)
-    TestHelpers.timed_wait(controller_task, 120; label="jsonrpc-output-controller")
+    TestHelpers.timed_wait(controller_task, 600; label="jsonrpc-output-controller")
 
     append_output = lock(notif_lock) do
         filter(n -> n.method == "appendOutput", notifications)
@@ -557,7 +557,9 @@ end
 
     # Wait for the slow test item to actually start running before we terminate
     process_id = Ref{Union{Nothing,String}}(nothing)
-    deadline = time() + 120
+    # Generous, because this waits on a real test process launching and precompiling, and the
+    # slowest CI legs are emulated. The point of the deadline is to fail rather than hang.
+    deadline = time() + 300
     while time() < deadline
         lock(notif_lock) do
             started = filter(n -> n.method == "testItemStarted", notifications)
@@ -573,6 +575,13 @@ end
         sleep(0.5)
     end
     @test process_id[] !== nothing
+    # Without this the test carried on and built the request with `testProcessId=nothing`,
+    # so a process that simply never started was reported as a TypeError from the protocol
+    # layer — hiding the assertion above, which is the actual finding.
+    if process_id[] === nothing
+        shutdown(jr_controller.controller)
+        return
+    end
 
     # Terminate the test process
     JSONRPC.send(
@@ -584,7 +593,7 @@ end
     # Wait for the createTestRun to complete — should finish promptly after
     # process termination errors the remaining items (not redistribute them).
     @info "[test] terminateTestProcess: waiting for response"
-    TestHelpers.timed_wait(response_task, 120; label="jsonrpc-terminate-response")
+    TestHelpers.timed_wait(response_task, 600; label="jsonrpc-terminate-response")
     response = fetch(response_task)
     @test response.status == "success"
 
@@ -593,7 +602,7 @@ end
     @info "[test] terminateTestProcess: shutting down"
     stop_collector()
     shutdown(jr_controller.controller)
-    TestHelpers.timed_wait(controller_task, 120; label="jsonrpc-terminate-controller")
+    TestHelpers.timed_wait(controller_task, 600; label="jsonrpc-terminate-controller")
 
     terminated = lock(notif_lock) do
         filter(n -> n.method == "testProcessTerminated", notifications)

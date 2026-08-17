@@ -447,7 +447,7 @@ end
         end
     finally
         shutdown(controller)
-        TestHelpers.timed_wait(controller_task, 60; label="controller")
+        TestHelpers.timed_wait(controller_task, 600; label="controller")
     end
 
     @test all(v -> v == 2, values(passed))

@@ -127,6 +127,17 @@ function _thread_spec(juliaNumThreads::Union{Nothing,String})
     return "$(parts[1]),$(max(interactive, WATCHDOG_INTERACTIVE_THREADS))"
 end
 
+# Give a process that has closed its pipe a short window to finish exiting under its own
+# power. Returns `true` if it did. Used before killing on an I/O error, so that a worker
+# which is *deliberately* exiting is not SIGTERMed mid-`exit` and made to look like a crash.
+function _wait_for_self_exit(p::Base.Process, timeout_secs::Real)
+    deadline = time() + timeout_secs
+    while process_running(p) && time() < deadline
+        sleep(0.02)
+    end
+    return !process_running(p)
+end
+
 struct TestProcessCrashException <: Exception
     testprocess_id::String
     exitcode::Union{Int,Nothing}
@@ -344,6 +355,15 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
                 connection_established = Ref(false)
                 @async try
                     wait(jl_process)
+                    # Record how the process ended the moment it does, on every path. The
+                    # exit code used to be captured only when the pipe read *errored*
+                    # (`TestProcessIOErrorMsg`); a clean `exit(66)` from a memory recycle
+                    # usually reads as plain EOF instead, so it reached the terminated
+                    # handler with no exit code, was not recognised as a recycle, and fell
+                    # into the crash path. Which of the two happened was a race — it flipped
+                    # between the first and second recycle in one run — hence CI-only hangs.
+                    ps.last_exit_code = jl_process.exitcode
+                    ps.last_term_signal = jl_process.termsignal
                     if !connection_established[]
                         if CancellationTokens.is_cancellation_requested(token)
                             @debug "Test process exited before connecting (cancellation requested)" testprocess_id exitcode=jl_process.exitcode pipe_name
@@ -412,7 +432,19 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
                 end
             catch err
                 if !(err isa CancellationTokens.OperationCanceledException)
-                    try kill(jl_process) catch end # We wrap in try catch because on Windows this fails if the process is already dead.
+                    # A pipe error is very often the *worker* closing its end because it is
+                    # exiting on its own — a memory recycle's `exit(66)`, say. Killing it
+                    # here raced that exit: on a fast machine the process was already gone
+                    # and the kill was a no-op, but on a slow runner it landed while the
+                    # worker was still inside `exit`, and the process died with SIGTERM
+                    # (signal 15) instead of its own exit code. The controller then read a
+                    # deliberate recycle as a crash. Only kill a process that is still
+                    # running *and* has not begun to exit; give a self-exiting one a moment
+                    # to finish reporting how it ended.
+                    if process_running(jl_process)
+                        _wait_for_self_exit(jl_process, 5.0) ||
+                            (try kill(jl_process) catch end) # Windows throws if it is already dead.
+                    end
                     wait(jl_process)
                     put!(reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal, jl_process.exitcode, jl_process.termsignal))
                 else

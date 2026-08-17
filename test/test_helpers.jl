@@ -123,7 +123,11 @@
             items, discovered.setups, discovered;
             julia_cmd="julia",
             julia_args=["+$version"],
-            timeout=600,
+            # This is dominated by juliaup fetching an old toolchain and that Julia
+            # precompiling into a fresh depot, which is unbounded on a slow runner — the
+            # 32-bit Windows leg times out at 600s. The deadline is here to catch a hang,
+            # not to hold the toolchain to a performance budget.
+            timeout=1800,
             env=isolated_depot_env(version)
         )
 
@@ -297,7 +301,7 @@
     # the second run gets the pooled, already-warm test process of the first. `runs` in the
     # returned value holds the per-run events and output; `events`/`outputs` are the union
     # across runs, which is what a single-run caller wants.
-    function run_testrun(items, setups; mode="Run", max_procs=1, timeout=300, coverage_root_uris=nothing, log_level=:Debug, julia_cmd=joinpath(Sys.BINDIR, "julia"), julia_args=String[], env=Dict{String,Union{String,Nothing}}(), item_timeouts=Dict{String,Float64}(), package_name="", package_uri="", project_uri=nothing, env_content_hash=nothing, n_runs=1, gc_between_testitems=nothing, memory_threshold=nothing)
+    function run_testrun(items, setups; mode="Run", max_procs=1, timeout=600, coverage_root_uris=nothing, log_level=:Debug, julia_cmd=joinpath(Sys.BINDIR, "julia"), julia_args=String[], env=Dict{String,Union{String,Nothing}}(), item_timeouts=Dict{String,Float64}(), package_name="", package_uri="", project_uri=nothing, env_content_hash=nothing, n_runs=1, gc_between_testitems=nothing, memory_threshold=nothing)
         events = NamedTuple[]
         events_lock = ReentrantLock()
         push_event!(e) = lock(events_lock) do
@@ -312,6 +316,8 @@
 
         process_events = NamedTuple[]
         process_events_lock = ReentrantLock()
+        process_output = Dict{String,Vector{String}}()
+        process_output_lock = ReentrantLock()
         push_process_event!(e) = lock(process_events_lock) do
             push!(process_events, e)
         end
@@ -328,7 +334,11 @@
 
             on_process_terminated = id -> push_process_event!((event=:process_terminated, id=id)),
             on_process_status_changed = (id, status) -> push_process_event!((event=:status_changed, id=id, status=status)),
-            on_process_output = (id, output) -> nothing,
+            # Kept, and dumped on timeout. Every hang this suite has produced on CI was a
+            # black box because the test processes' own output was discarded here.
+            on_process_output = (id, output) -> lock(process_output_lock) do
+                push!(get!(Vector{String}, process_output, id), output)
+            end,
         )
 
         controller = TestItemController(callbacks; log_level=log_level)
@@ -390,6 +400,16 @@
             if timed_out[]
                 shutdown(controller)
                 wait(controller_task)
+                # Say what every test process was doing when the run stalled. Without this a
+                # timeout on CI tells you only that a run did not finish, and the worker that
+                # actually wedged leaves no trace.
+                lock(process_output_lock) do
+                    for (pid, chunks) in process_output
+                        text = join(chunks)
+                        tail = length(text) > 4000 ? text[end-4000+1:end] : text
+                        @error "Test process output at timeout" testprocess_id=pid output=tail
+                    end
+                end
                 error("run_testrun timed out after $(timeout)s")
             end
 

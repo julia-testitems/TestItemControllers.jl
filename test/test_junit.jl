@@ -252,3 +252,38 @@ end
     @test occursin("DA:3,0", lcov)
     @test occursin("end_of_record", lcov)
 end
+
+@testitem "JUnit XML accepts a relative root" begin
+    using TestItemControllers: write_junit_xml, filepath2uri
+    using TestItemControllers.Results
+
+    # `relpath` does not resolve a relative start path against the working directory, so a
+    # relative root used to produce a `..`-heavy path, fail the guard in `_relative_path`,
+    # and silently emit absolute machine paths as classnames instead.
+    mktempdir() do dir
+        # macOS hands out `/var/...`, a symlink to `/private/var/...`, and `cd` + `pwd`
+        # resolve it — so without this the root and the item uris spell the same folder two
+        # ways, `relpath` walks out with `..`, and the writer falls back to absolute paths.
+        # The same one-folder-two-spellings disease as Windows 8.3 names, different OS.
+        dir = realpath(dir)
+        pkg = joinpath(dir, "pkg")
+        mkpath(joinpath(pkg, "test"))
+        item_uri = string(filepath2uri(joinpath(pkg, "test", "a.jl")))
+
+        result = TestrunResult(
+            TestrunResultDefinitionError[],
+            [TestrunResultTestitem("item", item_uri,
+                [TestrunResultTestitemProfile("P", :passed, 1.0, nothing, nothing)])],
+            Dict{String,String}(),
+        )
+
+        io = IOBuffer()
+        cd(dir) do
+            write_junit_xml(io, result; root="pkg")
+        end
+        xml = String(take!(io))
+
+        @test occursin("test/a.jl", xml)
+        @test !occursin(replace(pkg, "\\" => "/"), xml)
+    end
+end

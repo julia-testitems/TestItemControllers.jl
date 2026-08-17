@@ -163,6 +163,16 @@ end
 # ═══════════════════════════════════════════════════════════════════════════════
 
 function handle!(c::TestItemController, ::ShutdownMsg)
+    # Idempotent. A second shutdown request must be a no-op, not an FSM error: this runs on
+    # the reactor, and an exception here does not fail anything visibly — it kills the
+    # reactor loop, and every run in flight then hangs until its caller times out. That is
+    # precisely how a test-harness timeout that called `shutdown` twice turned a slow run
+    # into a wedged controller.
+    if state(c.controller_fsm) != ControllerRunning
+        @debug "Ignoring shutdown request; controller already $(state(c.controller_fsm))"
+        return state(c.controller_fsm) == ControllerStopped
+    end
+
     @info "Shutting down controller, terminating $(length(c.test_processes)) test process(es)"
     transition!(c.controller_fsm, ControllerShuttingDown; reason="shutdown requested")
 
@@ -233,6 +243,20 @@ end
 
 function handle!(c::TestItemController, msg::TestProcessTerminatedMsg)
     @info "Test process '$(msg.testprocess_id)' terminated"
+
+    # Make sure the exit code is known before anything below classifies this termination.
+    # The process watcher records it asynchronously and normally wins, but this message can
+    # be posted from the pipe reader the instant it hits EOF — and telling a memory-recycle
+    # `exit(66)` from a crash depends on the code being here. Read it straight off the
+    # process object as the fallback; the OS has reaped the child by the time its pipe has
+    # closed, so it is available without waiting.
+    if haskey(c.test_processes, msg.testprocess_id)
+        ps = c.test_processes[msg.testprocess_id]
+        if ps.last_exit_code === nothing && ps.jl_process !== nothing && !process_running(ps.jl_process)
+            ps.last_exit_code = ps.jl_process.exitcode
+            ps.last_term_signal = ps.jl_process.termsignal
+        end
+    end
 
     # Run-level redistribution must happen BEFORE pool cleanup below, because
     # the redistribution logic still needs ps state (current_testitem_id,
@@ -505,7 +529,7 @@ function handle!(c::TestItemController, msg::ProcsAcquiredMsg)
     for pid in tr.processes_ready_before_acquired
         if haskey(tr.testitem_ids_by_proc, pid) && haskey(c.test_processes, pid)
             ps = c.test_processes[pid]
-            items_for_proc = [tr.test_items[id] for id in tr.testitem_ids_by_proc[pid] if haskey(tr.test_items, id)]
+            items_for_proc = _items_for(tr, _resolve_test_env_id(tr, ps.env), tr.testitem_ids_by_proc[pid])
             @debug "Dispatching buffered test items to ready process" testrun_id=msg.testrun_id process_id=pid assigned=length(items_for_proc)
             if state(ps.fsm) == ProcessReadyToRun
                 transition!(ps.fsm, ProcessRunning; reason="dispatching buffered items")
@@ -575,7 +599,10 @@ function handle!(c::TestItemController, msg::ReadyToRunTestItemsMsg)
 
     if state(tr.fsm) == TestRunProcsAcquired || state(tr.fsm) == TestRunRunning
         @info "Test process '$(msg.testprocess_id)' is ready, dispatching test items"
-        items_for_proc = [tr.test_items[id] for id in get(tr.testitem_ids_by_proc, msg.testprocess_id, String[]) if haskey(tr.test_items, id)]
+        assigned_ids = get(tr.testitem_ids_by_proc, msg.testprocess_id, String[])
+        env_id = _resolve_test_env_id(tr, ps.env)
+        items_for_proc = _items_for(tr, env_id, assigned_ids)
+        @debug "Dispatch lookup" testprocess_id=msg.testprocess_id env_id assigned=length(assigned_ids) found=length(items_for_proc)
         if state(ps.fsm) == ProcessReadyToRun
             transition!(ps.fsm, ProcessRunning; reason="dispatching items")
         end
@@ -1085,7 +1112,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
     if msg.skip_remaining
         @info "Test process '$(terminated_proc_id)' terminated by user, erroring $(length(items_to_redistribute)) remaining item(s)"
         for testitem_id in items_to_redistribute
-            item = get(tr.test_items, testitem_id, nothing)
+            item = _item_for_env(tr, test_env_id, testitem_id)
             work_key = (testitem_id, test_env_id)
             if haskey(tr.remaining_work, work_key) && item !== nothing
                 delete!(tr.remaining_work, work_key)
@@ -1139,6 +1166,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
     # result was reported — so there is no in-flight item to blame, and the remaining items
     # go through the ordinary redistribute-or-respawn path below rather than being errored.
     recycled = ps !== nothing && ps.last_exit_code == MEMORY_RECYCLE_EXIT_CODE
+    @debug "Termination classification" testprocess_id=terminated_proc_id exit_code=(ps === nothing ? :no_ps : ps.last_exit_code) term_signal=(ps === nothing ? :no_ps : ps.last_term_signal) recycled
     if recycled
         @info "Test process '$(terminated_proc_id)' stopped itself to release memory, redistributing $(length(items_to_redistribute)) remaining item(s)"
         _cancel_timeout!(ps)
@@ -1148,17 +1176,21 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
     crashed_work_key = crashed_item_id !== nothing ? (crashed_item_id, test_env_id) : nothing
     if crashed_item_id !== nothing && haskey(tr.remaining_work, crashed_work_key)
         # A test item was actively running when the process crashed — error it immediately.
-        item = tr.test_items[crashed_item_id]
+        item = _item_for_env(tr, test_env_id, crashed_item_id)
+        # The details are only needed to describe the crash; the item must be reported as
+        # errored either way, so fall back to its id rather than letting a lookup miss
+        # decide whether a test run completes.
+        item_label = item === nothing ? crashed_item_id : item.label
         delete!(tr.remaining_work, crashed_work_key)
         filter!(!isequal(crashed_item_id), items_to_redistribute)
         _cancel_timeout!(ps)
         exit_info = ps !== nothing ? _exit_info_string(ps.last_exit_code, ps.last_term_signal) : nothing
         crash_detail = exit_info !== nothing ? " ($exit_info)" : ""
-        @info "Test process '$(terminated_proc_id)' crashed$(crash_detail) while running test item '$(item.label)', erroring it immediately"
+        @info "Test process '$(terminated_proc_id)' crashed$(crash_detail) while running test item '$(item_label)', erroring it immediately"
         error_message = if exit_info !== nothing
-            "Test process crashed with $exit_info while running test item '$(item.label)'"
+            "Test process crashed with $exit_info while running test item '$(item_label)'"
         else
-            "Test process crashed while running test item '$(item.label)'"
+            "Test process crashed while running test item '$(item_label)'"
         end
         push!(tr.reported_items, crashed_item_id)
         _notify_testitem_errored(c.callbacks,
@@ -1170,9 +1202,9 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
                     error_message,
                     nothing,
                     nothing,
-                    item.uri,
-                    item.line,
-                    item.column,
+                    item === nothing ? "" : item.uri,
+                    item === nothing ? 0 : item.line,
+                    item === nothing ? 0 : item.column,
                     nothing
                 )
             ],
@@ -1187,7 +1219,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
             # True startup crash — process never ran any item. Error all queued items.
             @info "Test process '$(terminated_proc_id)' crashed during startup, erroring $(length(items_to_redistribute)) queued item(s)"
             for testitem_id in items_to_redistribute
-                item = get(tr.test_items, testitem_id, nothing)
+                item = _item_for_env(tr, test_env_id, testitem_id)
                 work_key = (testitem_id, test_env_id)
                 if haskey(tr.remaining_work, work_key) && item !== nothing
                     delete!(tr.remaining_work, work_key)
@@ -1218,7 +1250,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
             # was received — no item ever began executing. Error all queued items.
             @info "Test process '$(terminated_proc_id)' crashed before starting any test item, erroring $(length(items_to_redistribute)) queued item(s)"
             for testitem_id in items_to_redistribute
-                item = get(tr.test_items, testitem_id, nothing)
+                item = _item_for_env(tr, test_env_id, testitem_id)
                 work_key = (testitem_id, test_env_id)
                 if haskey(tr.remaining_work, work_key) && item !== nothing
                     delete!(tr.remaining_work, work_key)
@@ -1279,7 +1311,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
         rps = c.test_processes[recipient_pid]
         append!(get!(tr.testitem_ids_by_proc, recipient_pid, String[]), items_to_redistribute)
 
-        items_to_run = [tr.test_items[id] for id in items_to_redistribute if haskey(tr.test_items, id)]
+        items_to_run = _items_for(tr, test_env_id, items_to_redistribute)
         @info "Redistributing $(length(items_to_run)) item(s) to existing process '$(recipient_pid)'"
         _send_run_testitems!(c, rps, items_to_run)
     else
@@ -1367,7 +1399,7 @@ function handle!(c::TestItemController, msg::TestItemTimeoutMsg)
     # Resolve test_env_id
     test_env_id = _resolve_test_env_id(tr, ps.env)
 
-    item = get(tr.test_items, msg.testitem_id, nothing)
+    item = _item_for_env(tr, test_env_id, msg.testitem_id)
     work_key = (msg.testitem_id, test_env_id)
     wu = get(tr.remaining_work, work_key, nothing)
     item_label = item !== nothing ? item.label : msg.testitem_id
@@ -1617,7 +1649,7 @@ function handle!(c::TestItemController, msg::ActivationFailedMsg)
         # Error all collected items
         for testitem_id in items_to_error
             work_key = (testitem_id, test_env_id)
-            item = get(tr.test_items, testitem_id, nothing)
+            item = _item_for_env(tr, test_env_id, testitem_id)
             if haskey(tr.remaining_work, work_key) && item !== nothing
                 delete!(tr.remaining_work, work_key)
                 push!(tr.reported_items, testitem_id)
@@ -1659,7 +1691,7 @@ function handle!(c::TestItemController, msg::ActivationFailedMsg)
         if haskey(tr.testitem_ids_by_proc, ps.id)
             for testitem_id in tr.testitem_ids_by_proc[ps.id]
                 work_key = (testitem_id, test_env_id)
-                item = get(tr.test_items, testitem_id, nothing)
+                item = _item_for_env(tr, test_env_id, testitem_id)
                 if haskey(tr.remaining_work, work_key) && item !== nothing
                     delete!(tr.remaining_work, work_key)
                     push!(tr.reported_items, testitem_id)
@@ -1878,7 +1910,77 @@ function _clear_testrun_on_process!(ps::TestProcessState)
     ps.has_started_items = false
 end
 
+# Drop cached setup state that the incoming run invalidates.
+#
+# `ps.loaded_setups` records what a `@testmodule`/`@testsnippet` cost and printed on this
+# process. The test process re-evaluates a setup whose code changed, so a cost measured
+# against the old body no longer describes it — and the scheduler would go on pricing warm
+# affinity for a setup this process can no longer reproduce.
+#
+# Called for every run on a pooled process, which is what makes it cover the Revise case
+# too: revised source reaches the process as changed setup code here, not through a separate
+# path. Deliberately conservative — a setup cached under an earlier run that this one does
+# not mention is dropped rather than assumed intact. Losing a cost hint only costs us a
+# scheduling opportunity; keeping a wrong one produces a worse schedule and hides why.
+function _invalidate_stale_setups!(ps::TestProcessState, new_setups)
+    isempty(ps.loaded_setups) && return nothing
+
+    previous = ps.test_setups === nothing ? Dict{Tuple{String,String},String}() :
+        Dict((i.packageUri, i.name) => i.code for i in ps.test_setups)
+    incoming = new_setups === nothing ? Dict{Tuple{String,String},String}() :
+        Dict((i.packageUri, i.name) => i.code for i in new_setups)
+
+    filter!(ps.loaded_setups) do (key, _)
+        haskey(incoming, key) && get(previous, key, nothing) == incoming[key]
+    end
+    return nothing
+end
+
+# Every test item in a run must be individually addressable, or the run silently loses one:
+# the state dicts are keyed by `(id, package_uri)`, so a genuine duplicate would overwrite its
+# twin and that item would never run, never report, and never appear in the results.
+#
+# Two items sharing an *id* is legitimate and must not error — that is the same package
+# checked out twice, which the package_uri separates. What cannot happen is a collision on
+# the full key, since discovery already suffixes duplicate labels within a file with `#N`.
+# So this should never fire; it exists so that a future mistake in the id scheme surfaces as
+# an error here rather than as a test that quietly stopped running.
+function _assert_addressable_items(test_items::Vector{TestItemDetail})
+    seen = Dict{Tuple{String,String},TestItemDetail}()
+    for item in test_items
+        key = (item.id, item.package_uri)
+        previous = get(seen, key, nothing)
+        if previous !== nothing
+            throw(ArgumentError(
+                "Two test items in this run share the id '$(item.id)' within the same package " *
+                "('$(item.package_uri)'), so one of them could not be run or reported. " *
+                "First at $(previous.uri):$(previous.line), second at $(item.uri):$(item.line)."))
+        end
+        seen[key] = item
+    end
+    return nothing
+end
+
+# Test item details, looked up for the package a given process is running. Ids are scoped to
+# their package, so the id alone does not identify an item when the same package is checked
+# out twice in one workspace — see the `test_items` field comment in `state.jl`.
+# One test item's details for the environment a process belongs to, or `nothing`.
+#
+# Returns `nothing` rather than throwing on a miss, and tolerates an unknown environment.
+# Both matter here: these lookups run on the process-termination path, and an exception
+# thrown out of a reactor handler does not surface as a failed test item — it kills the
+# reactor loop, so the run never completes and the caller waits until its timeout. A missing
+# detail should degrade to a generic message, not a hang.
+function _item_for_env(tr::TestRunState, test_env_id::Union{Nothing,AbstractString}, testitem_id::AbstractString)
+    test_env_id === nothing && return nothing
+    return get(tr.test_items, (testitem_id, test_env_id), nothing)
+end
+
+_items_for(tr::TestRunState, test_env_id::AbstractString, ids) =
+    TestItemDetail[tr.test_items[(id, test_env_id)] for id in ids if haskey(tr.test_items, (id, test_env_id))]
+
 function _setup_testrun_on_process!(ps::TestProcessState, testrun_id::String, test_setups, coverage_root_uris, log_level::Symbol, testrun_token)
+    _invalidate_stale_setups!(ps, test_setups)
     ps.testrun_id = testrun_id
     ps.testrun_token = testrun_token
     ps.test_setups = test_setups
@@ -2266,7 +2368,7 @@ reported as completed while one item was still "running".
 Diagnostic only — it reports nothing to callbacks and changes no state.
 """
 function _check_all_items_reported(tr::TestRunState)
-    unreported = [id for id in keys(tr.test_items) if id ∉ tr.reported_items]
+    unreported = [k[1] for k in keys(tr.test_items) if k[1] ∉ tr.reported_items]
     if !isempty(unreported)
         @error "Test run '$(tr.id)' is completing with $(length(unreported)) test item(s) that never produced a result. Consumers will show them as still running." unreported=sort(unreported)
     end
@@ -2280,7 +2382,15 @@ function _get_unchunked_items(tr::TestRunState, env::ProcessEnv)
         union!(assigned, ids)
     end
     test_env_id = _resolve_test_env_id(tr, env)
-    items = [id for (id, _) in tr.test_items if haskey(tr.remaining_work, (id, test_env_id)) && id ∉ assigned]
+    # Restricted to this env's package: with the same package checked out twice, both
+    # checkouts' items share an id, and only the ones belonging to this process's checkout
+    # may be handed to it.
+    # No package comparison here: `test_items` is keyed by env, and `remaining_work` is too,
+    # so both already scope to this environment.
+    items = [k[1] for (k, _) in tr.test_items
+             if k[2] == test_env_id &&
+                haskey(tr.remaining_work, (k[1], test_env_id)) &&
+                k[1] ∉ assigned]
     return items
 end
 
@@ -2372,7 +2482,7 @@ function _check_stealing!(c::TestItemController, tr::TestRunState, finished_proc
     end
 
     # Send items to thief
-    items_to_run = [tr.test_items[id] for id in testitem_ids_to_steal if haskey(tr.test_items, id)]
+    items_to_run = _items_for(tr, _resolve_test_env_id(tr, ps.env), testitem_ids_to_steal)
     _send_run_testitems!(c, ps, items_to_run)
     return
 end
@@ -2457,6 +2567,8 @@ function execute_testrun(
     memory_threshold::Union{Nothing,Float64}=nothing)
 
     @info "Creating new test run '$(testrun_id)' with $(length(test_items)) test item(s) and $(length(test_environments)) environment(s)"
+
+    _assert_addressable_items(test_items)
 
     # Build TestRunState
     tr = TestRunState(
