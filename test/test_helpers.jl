@@ -301,7 +301,7 @@
     # the second run gets the pooled, already-warm test process of the first. `runs` in the
     # returned value holds the per-run events and output; `events`/`outputs` are the union
     # across runs, which is what a single-run caller wants.
-    function run_testrun(items, setups; mode="Run", max_procs=1, timeout=600, coverage_root_uris=nothing, log_level=:Debug, julia_cmd=joinpath(Sys.BINDIR, "julia"), julia_args=String[], env=Dict{String,Union{String,Nothing}}(), item_timeouts=Dict{String,Float64}(), package_name="", package_uri="", project_uri=nothing, env_content_hash=nothing, n_runs=1, gc_between_testitems=nothing, memory_threshold=nothing)
+    function run_testrun(items, setups; mode="Run", max_procs=1, timeout=600, coverage_root_uris=nothing, log_level=:Debug, julia_cmd=joinpath(Sys.BINDIR, "julia"), julia_args=String[], env=Dict{String,Union{String,Nothing}}(), item_timeouts=Dict{String,Float64}(), package_name="", package_uri="", project_uri=nothing, env_content_hash=nothing, n_runs=1, gc_between_testitems=nothing, memory_threshold=nothing, shutdown_timeout=60)
         events = NamedTuple[]
         events_lock = ReentrantLock()
         push_event!(e) = lock(events_lock) do
@@ -340,6 +340,19 @@
                 push!(get!(Vector{String}, process_output, id), output)
             end,
         )
+
+        # Say what every test process was doing when something stalled. Without this a
+        # timeout on CI tells you only that a run did not finish, and the worker that
+        # actually wedged leaves no trace.
+        function dump_process_output()
+            lock(process_output_lock) do
+                for (pid, chunks) in process_output
+                    text = join(chunks)
+                    tail = length(text) > 4000 ? text[end-4000+1:end] : text
+                    @error "Test process output at timeout" testprocess_id=pid output=tail
+                end
+            end
+        end
 
         controller = TestItemController(callbacks; log_level=log_level)
         test_env = make_test_environment(; mode=mode, julia_cmd=julia_cmd, julia_args=julia_args, env=env, package_name=package_name, package_uri=package_uri, project_uri=project_uri, env_content_hash=env_content_hash)
@@ -399,17 +412,12 @@
 
             if timed_out[]
                 shutdown(controller)
-                wait(controller_task)
-                # Say what every test process was doing when the run stalled. Without this a
-                # timeout on CI tells you only that a run did not finish, and the worker that
-                # actually wedged leaves no trace.
-                lock(process_output_lock) do
-                    for (pid, chunks) in process_output
-                        text = join(chunks)
-                        tail = length(text) > 4000 ? text[end-4000+1:end] : text
-                        @error "Test process output at timeout" testprocess_id=pid output=tail
-                    end
+                try
+                    timed_wait(controller_task, shutdown_timeout; label="controller shutdown after run timeout")
+                catch err
+                    @error "Controller did not shut down after the run timed out" exception=err
                 end
+                dump_process_output()
                 error("run_testrun timed out after $(timeout)s")
             end
 
@@ -420,8 +428,17 @@
             push!(runs, (testrun_id=testrun_id, events=run_events, outputs=run_outputs))
         end
 
+        # Bounded, unlike a bare `wait`: a controller that wedges in shutdown used to hang
+        # the test item until the CI watchdog killed it 20 minutes later, with nothing to
+        # show for it. Now it fails within `shutdown_timeout` and prints what each worker was
+        # doing.
         shutdown(controller)
-        wait(controller_task)
+        try
+            timed_wait(controller_task, shutdown_timeout; label="controller shutdown")
+        catch err
+            dump_process_output()
+            rethrow()
+        end
 
         return (events=events, process_events=process_events, coverage=coverage_result, outputs=outputs, runs=runs)
     end

@@ -71,6 +71,19 @@ end
     # actionable when it turns up in a CI log.
     @test occursin(slow.label, output)
     @test occursin("Julia ", output)
+    # The dump must carry actual evidence, not just a header. The profile capture shipped
+    # broken on 1.12 (a world-age error swallowed into "No CPU profile: ...") while this test
+    # stayed green because it only checked the header. Task backtraces are what locate a
+    # *blocked* task; the profile only ever shows running code. Assert on positive markers:
+    # the dump is written in sections, so a section that never made it to disk would leave
+    # no "No ..." line to check for. `Root task` is printed by the runtime's task dump and
+    # `Overhead` heads `Profile.print`'s tree.
+    @test occursin("Task backtraces", output)
+    @test occursin("Root task", output)
+    @test occursin("CPU profile", output)
+    @test occursin("Overhead", output)
+    @test !occursin("No CPU profile", output)
+    @test !occursin("No task backtraces", output)
 end
 
 @testitem "A test process over the memory threshold is recycled without losing items" setup=[TestHelpers] begin
@@ -128,4 +141,85 @@ end
 
     @test length(filter(e -> e.event == :passed, result.events)) == 2
     @test isempty(filter(e -> e.event in (:failed, :errored), result.events))
+end
+
+@testitem "Shutdown stops within its grace period when a process never reports termination" setup=[TestHelpers] begin
+    # The reactor leaves `ControllerShuttingDown` only when every tracked process has posted
+    # a `TestProcessTerminatedMsg`. A process whose IO task has wedged never posts one, and
+    # before the shutdown deadline existed that kept `run(controller)` from ever returning —
+    # a CI item then hung until the runner's 20 minute watchdog killed it, with nothing to
+    # show for it. Model the wedge directly: a tracked process with no IO task at all.
+    using TestItemControllers: TestItemController, ControllerCallbacks, TestProcessState, ProcessEnv,
+        shutdown, state, ControllerStopped, ProcessDead
+
+    terminated = String[]
+    callbacks = ControllerCallbacks(
+        on_testitem_started = (run_id, item_id, test_env_id) -> nothing,
+        on_testitem_passed = (run_id, item_id, test_env_id, duration) -> nothing,
+        on_testitem_failed = (run_id, item_id, test_env_id, messages, duration) -> nothing,
+        on_testitem_errored = (run_id, item_id, test_env_id, messages, duration) -> nothing,
+        on_testitem_skipped = (run_id, item_id, test_env_id) -> nothing,
+        on_append_output = (run_id, item_id, test_env_id, output) -> nothing,
+        on_attach_debugger = (run_id, pipe_name) -> nothing,
+        on_process_terminated = id -> push!(terminated, id),
+    )
+
+    controller = TestItemController(callbacks; shutdown_grace_seconds=1.0)
+
+    env = ProcessEnv("file:///project", "file:///package", "MyPkg", "julia", String[], nothing, "Run",
+        Dict{String,Union{String,Nothing}}())
+    ps = TestProcessState("stuck-proc", env)
+    controller.test_processes[ps.id] = ps
+    controller.process_pool[env] = [ps.id]
+
+    controller_task = @async run(controller)
+    shutdown(controller)
+
+    # Well under the old "forever", comfortably over the 1s grace.
+    TestHelpers.timed_wait(controller_task, 15; label="controller shutdown with a stuck process")
+
+    @test state(controller.controller_fsm) == ControllerStopped
+    @test isempty(controller.test_processes)
+    @test isempty(controller.process_pool[env])
+    @test state(ps.fsm) == ProcessDead
+    @test terminated == ["stuck-proc"]
+    @test controller.shutdown_timer === nothing
+end
+
+@testitem "Shutdown does not wait out the grace period when processes report normally" setup=[TestHelpers] begin
+    # The deadline is a backstop, not a delay: a normal shutdown must still stop the moment
+    # the last process is gone, and must disarm the timer so it cannot fire into a stopped
+    # controller.
+    using TestItemControllers: TestItemController, ControllerCallbacks, TestProcessState, ProcessEnv,
+        TestProcessTerminatedMsg, shutdown, state, ControllerStopped
+
+    callbacks = ControllerCallbacks(
+        on_testitem_started = (run_id, item_id, test_env_id) -> nothing,
+        on_testitem_passed = (run_id, item_id, test_env_id, duration) -> nothing,
+        on_testitem_failed = (run_id, item_id, test_env_id, messages, duration) -> nothing,
+        on_testitem_errored = (run_id, item_id, test_env_id, messages, duration) -> nothing,
+        on_testitem_skipped = (run_id, item_id, test_env_id) -> nothing,
+        on_append_output = (run_id, item_id, test_env_id, output) -> nothing,
+        on_attach_debugger = (run_id, pipe_name) -> nothing,
+    )
+
+    controller = TestItemController(callbacks; shutdown_grace_seconds=60.0)
+
+    env = ProcessEnv("file:///project", "file:///package", "MyPkg", "julia", String[], nothing, "Run",
+        Dict{String,Union{String,Nothing}}())
+    ps = TestProcessState("proc-1", env)
+    controller.test_processes[ps.id] = ps
+
+    controller_task = @async run(controller)
+    shutdown(controller)
+    # Stand in for the IO task: report the termination ourselves.
+    put!(controller.reactor_channel, TestProcessTerminatedMsg(ps.id, nothing, false))
+
+    t0 = time()
+    TestHelpers.timed_wait(controller_task, 15; label="controller shutdown")
+    @test time() - t0 < 30  # i.e. it did not sit out the 60s grace
+
+    @test state(controller.controller_fsm) == ControllerStopped
+    @test isempty(controller.test_processes)
+    @test controller.shutdown_timer === nothing
 end
