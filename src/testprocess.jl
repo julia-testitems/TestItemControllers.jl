@@ -445,6 +445,21 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
                         _wait_for_self_exit(jl_process, 5.0) ||
                             (try kill(jl_process) catch end) # Windows throws if it is already dead.
                     end
+                    # `kill` is SIGTERM, which a wedged child can sit through indefinitely, and
+                    # a bare `wait` here would then never post the message below — leaving the
+                    # controller with a process it believes is alive and, at shutdown, a
+                    # reactor waiting for a termination that cannot come. Escalate.
+                    if process_running(jl_process) && !_wait_for_self_exit(jl_process, 5.0)
+                        @warn "Test process did not exit after SIGTERM; killing it" testprocess_id
+                        try
+                            @static if Sys.iswindows()
+                                kill(jl_process)
+                            else
+                                kill(jl_process, Base.SIGKILL)
+                            end
+                        catch
+                        end
+                    end
                     wait(jl_process)
                     put!(reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal, jl_process.exitcode, jl_process.termsignal))
                 else

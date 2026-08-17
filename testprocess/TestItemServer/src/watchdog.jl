@@ -114,6 +114,41 @@ function _capture_profile(prof::Module)
     return String(take!(io.io))
 end
 
+# A CPU profile only shows code that is *running*. A wedged reactor or a task blocked in a
+# `wait` never appears in it, so we also dump every live task's backtrace. The runtime
+# exports `jl_print_task_backtraces` for exactly this (it is what SIGINFO/SIGUSR1 use), but
+# it prints straight to fd 2 with `jl_safe_printf`, so we point fd 2 at a scratch file for
+# the duration. Julia < 1.10 does not have the symbol; the ccall then throws and we say so.
+function _capture_task_backtraces()
+    file = WATCHDOG_FILE[]
+    file === nothing && return ""
+    scratch = file * ".tasks"
+    text = ""
+    saved_stderr = Base.Libc.dup(RawFD(2))
+    try
+        open(scratch, "w") do io
+            flush(io)
+            Base.Libc.dup(RawFD(fd(io)), RawFD(2))
+            try
+                ccall(:jl_print_task_backtraces, Cvoid, (Cint,), 0)
+            finally
+                Base.Libc.dup(saved_stderr, RawFD(2))
+            end
+        end
+        text = read(scratch, String)
+    finally
+        # `dup` handed us a fresh descriptor; close it directly, no libuv involved. (`RawFD`
+        # converts to `Cint` in the ccall; it has no field to reach into on newer Julia.)
+        @static if Sys.iswindows()
+            ccall(:_close, Cint, (Cint,), saved_stderr)
+        else
+            ccall(:close, Cint, (Cint,), saved_stderr)
+        end
+        try rm(scratch; force = true) catch end
+    end
+    return text
+end
+
 function _memory_summary()
     return try
         free = Sys.free_memory() / 2^30
@@ -151,7 +186,12 @@ function _build_dump(testitem_id::AbstractString, timeout_ms::Float64)
         println(io, "No CPU profile: the Profile stdlib is not loadable in this test process.")
     else
         try
-            profile_text = _capture_profile(prof)
+            # `Profile` is loaded by `Base.require` inside `start_watchdog!`, i.e. after that
+            # frame's world age was fixed, and the spawned watchdog task inherits that stale
+            # world. Calling `prof.init` etc. from it fails with "method too new to be called
+            # from this world context" (seen on 1.12). `invokelatest` runs the whole capture in
+            # the current world.
+            profile_text = Base.invokelatest(_capture_profile, prof)
             if isempty(strip(profile_text))
                 println(io, "No CPU profile: the sampler collected no snapshots.")
             else
@@ -160,6 +200,19 @@ function _build_dump(testitem_id::AbstractString, timeout_ms::Float64)
         catch err
             println(io, "No CPU profile: capturing one failed with ", sprint(showerror, err))
         end
+    end
+    println(io, rule)
+    println(io, "Task backtraces")
+    try
+        tasks_text = _capture_task_backtraces()
+        if isempty(strip(tasks_text))
+            println(io, "No task backtraces: the runtime produced no output.")
+        else
+            print(io, tasks_text)
+            endswith(tasks_text, "\n") || println(io)
+        end
+    catch err
+        println(io, "No task backtraces: capturing them failed with ", sprint(showerror, err))
     end
     println(io, rule)
     return String(take!(io))

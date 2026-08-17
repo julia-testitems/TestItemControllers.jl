@@ -19,6 +19,10 @@ the reactor event loop, then use [`execute_testrun`](@ref) to submit work.
   [`schedule_testitems`](@ref), falling back to contiguous chunking on the first run of a
   session, when there is no history to work from. `:contiguous` always chunks, which is
   the behaviour of releases before this option existed.
+- `shutdown_grace_seconds::Real` — how long [`shutdown`](@ref) waits for every test process
+  to report its termination before force-killing whatever is left and stopping anyway
+  (default 30). Shutdown normally completes well within a second; this only bounds the
+  failure case.
 
 # Lifecycle
 
@@ -30,6 +34,10 @@ the reactor event loop, then use [`execute_testrun`](@ref) to submit work.
 See also [`ControllerCallbacks`](@ref), [`execute_testrun`](@ref), [`shutdown`](@ref),
 [`wait_for_shutdown`](@ref).
 """
+# Shutdown normally completes as soon as every process has reported its termination — a
+# few hundred milliseconds. This is the backstop for the case where one never does.
+const DEFAULT_SHUTDOWN_GRACE_SECONDS = 30.0
+
 mutable struct TestItemController{CB<:ControllerCallbacks}
     callbacks::CB
 
@@ -59,6 +67,11 @@ mutable struct TestItemController{CB<:ControllerCallbacks}
     log_level::Symbol
     controller_fsm::FSM{ControllerPhase}
 
+    # How long a shutdown waits for every process to report its termination before it
+    # force-kills whatever is left and stops anyway. See `handle!(::ShutdownDeadlineMsg)`.
+    shutdown_grace_seconds::Float64
+    shutdown_timer::Union{Nothing,Timer}
+
     # Scheduling history, in memory and keyed by the (stable) test item id. It survives
     # across the test runs of one session; nothing is persisted to disk.
     schedule::Symbol
@@ -71,10 +84,13 @@ mutable struct TestItemController{CB<:ControllerCallbacks}
         error_handler_file=nothing,
         crash_reporting_pipename=nothing,
         log_level::Symbol=:Info,
-        schedule::Symbol=:duration) where {CB<:ControllerCallbacks}
+        schedule::Symbol=:duration,
+        shutdown_grace_seconds::Real=DEFAULT_SHUTDOWN_GRACE_SECONDS) where {CB<:ControllerCallbacks}
 
         schedule in (:duration, :contiguous) ||
             throw(ArgumentError("schedule must be :duration or :contiguous, got $(repr(schedule))"))
+        shutdown_grace_seconds > 0 ||
+            throw(ArgumentError("shutdown_grace_seconds must be positive, got $(shutdown_grace_seconds)"))
 
         return new{CB}(
             callbacks,
@@ -89,6 +105,8 @@ mutable struct TestItemController{CB<:ControllerCallbacks}
             crash_reporting_pipename,
             log_level,
             controller_fsm("controller"),
+            Float64(shutdown_grace_seconds),
+            nothing,
             schedule,
             Dict{String,Symbol}(),
             Dict{String,Float64}(),
@@ -105,6 +123,11 @@ all child processes are terminated, and the reactor loop exits.
 
 This function returns immediately. Use [`wait_for_shutdown`](@ref) to block
 until all resources are fully released.
+
+The reactor stops as soon as every child process has reported its termination. Should
+one fail to within `shutdown_grace_seconds` (a [`TestItemController`](@ref) keyword,
+default 30 s), whatever is left is force-killed and dropped, so the reactor loop is
+guaranteed to exit.
 """
 function shutdown(controller::TestItemController)
     @info "Queueing controller shutdown"
@@ -185,7 +208,7 @@ function handle!(c::TestItemController, ::ShutdownMsg)
                 _notify_testitem_skipped(c.callbacks, trid, testitem_id, test_env_id)
             end
             transition!(tr.fsm, TestRunCancelled; reason="shutdown")
-            try put!(tr.completion_channel, nothing) catch end
+            _signal_testrun_completion!(tr, nothing)
         end
     end
 
@@ -197,10 +220,94 @@ function handle!(c::TestItemController, ::ShutdownMsg)
     end
 
     if isempty(c.test_processes)
-        transition!(c.controller_fsm, ControllerStopped; reason="no processes to drain")
+        _controller_stopped!(c; reason="no processes to drain")
         return true  # break reactor loop
     end
+
+    # From here the reactor only stops once every remaining process has posted a
+    # `TestProcessTerminatedMsg`. Bound that wait: if any process never reports — its IO task
+    # wedged, its child ignores SIGTERM, whatever — the deadline handler force-kills and
+    # drops what is left. Without this a single stuck worker keeps `run(controller)` from
+    # ever returning, and every caller waiting on it hangs with it.
+    grace = c.shutdown_grace_seconds
+    reactor_channel = c.reactor_channel
+    c.shutdown_timer = Timer(grace) do _
+        put!(reactor_channel, ShutdownDeadlineMsg())
+    end
     return false
+end
+
+function _controller_stopped!(c::TestItemController; reason::String)
+    if c.shutdown_timer !== nothing
+        try close(c.shutdown_timer) catch end
+        c.shutdown_timer = nothing
+    end
+    transition!(c.controller_fsm, ControllerStopped; reason=reason)
+    return nothing
+end
+
+function handle!(c::TestItemController, ::ShutdownDeadlineMsg)
+    c.shutdown_timer = nothing
+    if state(c.controller_fsm) != ControllerShuttingDown
+        # Already stopped normally (the timer raced the last termination), or never shutting
+        # down at all; either way there is nothing to force.
+        return state(c.controller_fsm) == ControllerStopped
+    end
+
+    remaining = collect(values(c.test_processes))
+    @warn "Shutdown did not complete within $(c.shutdown_grace_seconds)s; force-terminating $(length(remaining)) test process(es)" processes=[(id=ps.id, state=string(state(ps.fsm))) for ps in remaining]
+
+    for ps in remaining
+        _force_terminate_process!(c, ps; reason="shutdown deadline")
+    end
+
+    _controller_stopped!(c; reason="shutdown deadline")
+    return true  # break reactor loop
+end
+
+# The unconditional counterpart of the normal termination path: no waiting for the process
+# IO task, no message round-trip. Kills the child outright (SIGKILL where that exists —
+# plain `kill` already SIGTERMed it on the normal path and it evidently did not go), drops
+# every registration and forgets the process. Only for when the cooperative path has failed.
+function _force_terminate_process!(c::TestItemController, ps::TestProcessState; reason::String)
+    jl_process = ps.jl_process
+    if jl_process !== nothing && process_running(jl_process)
+        try
+            @static if Sys.iswindows()
+                kill(jl_process)
+            else
+                kill(jl_process, Base.SIGKILL)
+            end
+        catch
+        end
+    end
+
+    for reg in (ps.termination_reg, ps.testrun_watcher_registration, ps.timeout_reg)
+        reg === nothing || (try close(reg) catch end)
+    end
+    ps.termination_reg = nothing
+    ps.testrun_watcher_registration = nothing
+    ps.timeout_reg = nothing
+    if ps.timeout_cs !== nothing
+        try CancellationTokens.cancel(ps.timeout_cs) catch end
+        ps.timeout_cs = nothing
+    end
+    ps.jl_process = nothing
+    ps.endpoint = nothing
+
+    if state(ps.fsm) != ProcessDead
+        transition!(ps.fsm, ProcessDead; reason=reason)
+    end
+
+    pool_ids = get(c.process_pool, ps.env, String[])
+    idx = findfirst(isequal(ps.id), pool_ids)
+    idx === nothing || deleteat!(pool_ids, idx)
+    delete!(c.test_processes, ps.id)
+
+    if c.callbacks.on_process_terminated !== nothing
+        c.callbacks.on_process_terminated(ps.id)
+    end
+    return nothing
 end
 
 function handle!(c::TestItemController, msg::TestProcessStatusChangedMsg)
@@ -297,7 +404,7 @@ function handle!(c::TestItemController, msg::TestProcessTerminatedMsg)
 
     # If shutting down and all processes gone, transition to stopped
     if state(c.controller_fsm) == ControllerShuttingDown && isempty(c.test_processes)
-        transition!(c.controller_fsm, ControllerStopped; reason="all processes terminated")
+        _controller_stopped!(c; reason="all processes terminated")
         return true  # break reactor loop
     end
     return false
@@ -582,7 +689,7 @@ function handle!(c::TestItemController, msg::TestRunCancelledMsg)
     end
 
     # Signal completion
-    try put!(tr.completion_channel, nothing) catch end
+    _signal_testrun_completion!(tr, nothing)
     return false
 end
 
@@ -1732,10 +1839,15 @@ function handle!(c::TestItemController, msg::TestProcessIOErrorMsg)
     end
     ps = c.test_processes[msg.testprocess_id]
 
-    if state(ps.fsm) in (ProcessDead, ProcessIdle)
+    if state(ps.fsm) == ProcessDead
         @debug "Ignoring IO error for process in state $(state(ps.fsm))" testprocess_id=msg.testprocess_id
         return false
     end
+    # An *idle* process used to be ignored here too. That left a pooled process whose pipe
+    # had broken registered as alive: it would be handed out again later, and — worse — at
+    # shutdown the reactor waited forever for a `TestProcessTerminatedMsg` that its IO task,
+    # having taken the error path, was never going to post. Fall through: with no test run
+    # attached it cannot take the restart branch, so it is terminated and forgotten below.
 
     @debug "Test process IO error" testprocess_id=msg.testprocess_id error_type=msg.error_type fsm_state=state(ps.fsm) has_testrun=(ps.testrun_id !== nothing) testrun_id=something(ps.testrun_id, "none") exit_code=msg.exit_code term_signal=msg.term_signal
 
@@ -1869,7 +1981,14 @@ function _kill_julia_process_resources!(jl_process::Union{Nothing,Base.Process},
         try kill(jl_process) catch end
     end
     if endpoint !== nothing
-        try close(endpoint) catch end
+        # This runs inside a cancellation callback, i.e. synchronously on whichever task
+        # called `cancel` — normally the reactor. `close(::JSONRPCEndpoint)` blocks until the
+        # endpoint's read and write tasks have finished, and if either of those does not
+        # come back the reactor is wedged and can never process the termination message it
+        # is waiting for. Nothing needs this close to be synchronous: the process IO task in
+        # `start` closes the endpoint itself in a `finally`, and its `get_next_message` is
+        # unblocked by the process token, not by this close. So do it off the caller.
+        @async try close(endpoint) catch end
     end
 end
 
@@ -2064,6 +2183,23 @@ function _replace_process_state!(
     delete!(c.test_processes, old_id)
 
     return new_ps, old_id
+end
+
+# Hand `execute_testrun` its result. `completion_channel` is `Channel{Any}(1)`; a `put!` on a
+# full channel does not throw, it *blocks* — and this runs on the reactor, so the old
+# `try put! catch end` was no protection at all when a run was signalled twice (a shutdown
+# racing a completing run, say). A value already sitting in the channel means the run has
+# been signalled; the waiter only ever takes once.
+function _signal_testrun_completion!(tr::TestRunState, value)
+    ch = tr.completion_channel
+    try
+        if !isready(ch) && isopen(ch)
+            put!(ch, value)
+        end
+    catch err
+        @debug "Could not signal test run completion" testrun_id=tr.id exception=err
+    end
+    return nothing
 end
 
 function _shutdown_test_process!(c::TestItemController, ps::TestProcessState)
@@ -2520,7 +2656,7 @@ function _check_testrun_complete!(c::TestItemController, tr::TestRunState)
             end
         end
 
-        try put!(tr.completion_channel, coverage_results) catch end
+        _signal_testrun_completion!(tr, coverage_results)
     else
         @debug "$(remaining) test item(s) remaining ($(pending_stolen) pending stolen confirmation(s))"
     end

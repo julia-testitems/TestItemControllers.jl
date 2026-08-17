@@ -7,6 +7,10 @@ abstract type ReactorMessage end
 
 struct ShutdownMsg <: ReactorMessage end
 
+# Posted by a timer armed in `handle!(::ShutdownMsg)`. If processes are still tracked when
+# it arrives, they are force-killed and dropped so the reactor loop is guaranteed to exit.
+struct ShutdownDeadlineMsg <: ReactorMessage end
+
 struct GetProcsForTestRunMsg <: ReactorMessage
     testrun_id::String
     proc_count_by_env::Dict{ProcessEnv,Int}
