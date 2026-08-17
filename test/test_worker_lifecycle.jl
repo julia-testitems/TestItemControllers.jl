@@ -74,9 +74,15 @@ end
     # The dump must carry actual evidence, not just a header. The profile capture shipped
     # broken on 1.12 (a world-age error swallowed into "No CPU profile: ...") while this test
     # stayed green because it only checked the header. Task backtraces are what locate a
-    # *blocked* task; the profile only ever shows running code.
-    @test !occursin("No CPU profile", output)
+    # *blocked* task; the profile only ever shows running code. Assert on positive markers:
+    # the dump is written in sections, so a section that never made it to disk would leave
+    # no "No ..." line to check for. `Root task` is printed by the runtime's task dump and
+    # `Overhead` heads `Profile.print`'s tree.
     @test occursin("Task backtraces", output)
+    @test occursin("Root task", output)
+    @test occursin("CPU profile", output)
+    @test occursin("Overhead", output)
+    @test !occursin("No CPU profile", output)
     @test !occursin("No task backtraces", output)
 end
 

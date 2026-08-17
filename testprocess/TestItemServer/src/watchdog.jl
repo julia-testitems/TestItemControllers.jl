@@ -22,7 +22,8 @@
 # guarantee nothing), so sharing the captured-output stream with a test item that is still
 # printing would shred both. One writer, one file, no framing needed. The controller reads
 # the file when its own timeout fires and attributes the contents to whichever item the
-# process was running.
+# process was running. It is written section by section (see `_write_dump`), so a dump that
+# is slow to build on a loaded machine still leaves its first sections behind.
 
 # Set by the controller on the test process launch; absent means diagnostics are disabled.
 const DIAGNOSTICS_FILE_ENV_VAR = "JULIA_TESTITEMSERVER_DIAGNOSTICS_FILE"
@@ -169,18 +170,43 @@ function _thread_summary()
     end
 end
 
-function _build_dump(testitem_id::AbstractString, timeout_ms::Float64)
+const DUMP_RULE = "─"^78
+
+function _dump_header(testitem_id::AbstractString, timeout_ms::Float64)
     io = IOBuffer()
-    rule = "─"^78
     println(io)
-    println(io, rule)
+    println(io, DUMP_RULE)
     println(io, "Hang diagnostics for test item '", testitem_id, "'")
     println(io, "Captured by the test process watchdog because the item was still running ",
         round(timeout_ms / 1000, digits = 1), "s into its timeout.")
     println(io, "Julia ", VERSION, " on ", Sys.MACHINE, ", pid ", getpid(), ", threads: ", _thread_summary())
     println(io, "Memory: ", _memory_summary())
-    println(io, rule)
+    println(io, DUMP_RULE)
+    return String(take!(io))
+end
 
+function _dump_task_backtraces()
+    io = IOBuffer()
+    println(io, "Task backtraces")
+    try
+        tasks_text = _capture_task_backtraces()
+        if isempty(strip(tasks_text))
+            println(io, "No task backtraces: the runtime produced no output.")
+        else
+            print(io, tasks_text)
+            endswith(tasks_text, "
+") || println(io)
+        end
+    catch err
+        println(io, "No task backtraces: capturing them failed with ", sprint(showerror, err))
+    end
+    println(io, DUMP_RULE)
+    return String(take!(io))
+end
+
+function _dump_profile()
+    io = IOBuffer()
+    println(io, "CPU profile")
     prof = WATCHDOG_PROFILE[]
     if prof === nothing
         println(io, "No CPU profile: the Profile stdlib is not loadable in this test process.")
@@ -201,21 +227,22 @@ function _build_dump(testitem_id::AbstractString, timeout_ms::Float64)
             println(io, "No CPU profile: capturing one failed with ", sprint(showerror, err))
         end
     end
-    println(io, rule)
-    println(io, "Task backtraces")
-    try
-        tasks_text = _capture_task_backtraces()
-        if isempty(strip(tasks_text))
-            println(io, "No task backtraces: the runtime produced no output.")
-        else
-            print(io, tasks_text)
-            endswith(tasks_text, "\n") || println(io)
-        end
-    catch err
-        println(io, "No task backtraces: capturing them failed with ", sprint(showerror, err))
-    end
-    println(io, rule)
+    println(io, DUMP_RULE)
     return String(take!(io))
+end
+
+# The dump is written in sections, each appended to the file the moment it is ready, rather
+# than assembled and written once at the end. The controller only waits a fixed grace period
+# past the item's timeout before it kills the process and reads the file, and the profile
+# alone spends a second sampling and then pays for a cold `Profile.print`; on a slow CI
+# runner the full dump overran that window and *nothing* reached the file. Cheapest and most
+# useful first: the header is instant, task backtraces are what locate a blocked task, and
+# the profile — which only ever shows running code — comes last.
+function _write_dump(testitem_id::AbstractString, timeout_ms::Float64)
+    _write_diagnostics(_dump_header(testitem_id, timeout_ms))
+    _write_diagnostics(_dump_task_backtraces())
+    _write_diagnostics(_dump_profile())
+    return nothing
 end
 
 function _watchdog_loop()
@@ -239,7 +266,7 @@ function _watchdog_loop()
         timeout_ms = WATCHDOG_ITEM_TIMEOUT_MS[]
 
         try
-            _write_diagnostics(_build_dump(testitem_id, timeout_ms))
+            _write_dump(testitem_id, timeout_ms)
         catch err
             # Deliberately swallowed — a failing watchdog must not take the process down.
         end

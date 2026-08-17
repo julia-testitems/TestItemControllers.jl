@@ -94,8 +94,12 @@ _diagnostics_file_path(testprocess_id::AbstractString) =
     joinpath(tempdir(), "testitemserver-diagnostics-$(testprocess_id).log")
 
 # How long the controller waits past an item's timeout before killing its test process, so
-# the process's watchdog has time to write a dump first.
-const WATCHDOG_KILL_GRACE_SECONDS = 5.0
+# the process's watchdog has time to write a dump first. What has to fit: the watchdog fires
+# `WATCHDOG_LEAD_MS` before the timeout, then symbolicates every live task's backtrace, then
+# samples a CPU profile for a second and pays for a cold `Profile.print`. On a slow, cold CI
+# runner that took more than five seconds; the dump is written in sections so a partial one
+# survives, but ten gives the whole thing room. Only a timed-out item pays this latency.
+const WATCHDOG_KILL_GRACE_SECONDS = 10.0
 
 # Whatever the test process's watchdog has written so far, or `nothing` when it wrote
 # nothing. Consuming the file keeps a second timeout on the same process from replaying an
