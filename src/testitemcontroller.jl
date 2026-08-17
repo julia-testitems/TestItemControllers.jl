@@ -2375,16 +2375,23 @@ function _check_all_items_reported(tr::TestRunState)
     return unreported
 end
 
-"""Get items for a ProcessEnv that haven't been assigned to a process yet."""
-function _get_unchunked_items(tr::TestRunState, env::ProcessEnv)
+"""
+Get items for a ProcessEnv that haven't been assigned to a process yet.
+
+`env_pids` are the processes belonging to `env`, and only those may be consulted for what is
+already assigned. `testitem_ids_by_proc` holds bare ids, which are unique only within a
+package: with the same package checked out twice, both checkouts mint the same id under
+different environments. Unioning across *every* process therefore let one environment's
+assignment mask the other's identically-named item, which was then never handed to a process
+— `remaining_work` never emptied and the run hung instead of completing.
+"""
+function _get_unchunked_items(tr::TestRunState, env::ProcessEnv, env_pids)
     assigned = Set{String}()
-    for (_, ids) in tr.testitem_ids_by_proc
-        union!(assigned, ids)
+    for pid in env_pids
+        ids = get(tr.testitem_ids_by_proc, pid, nothing)
+        ids === nothing || union!(assigned, ids)
     end
     test_env_id = _resolve_test_env_id(tr, env)
-    # Restricted to this env's package: with the same package checked out twice, both
-    # checkouts' items share an id, and only the ones belonging to this process's checkout
-    # may be handed to it.
     # No package comparison here: `test_items` is keyed by env, and `remaining_work` is too,
     # so both already scope to this environment.
     items = [k[1] for (k, _) in tr.test_items
