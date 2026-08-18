@@ -1956,9 +1956,22 @@ const _SIGNAL_NAMES = Dict{Int,String}(
     15 => "SIGTERM",
 )
 
+# `Base.Process.termsignal` is `0`, not `nothing`, for a process that exited with a code
+# rather than being killed by a signal — so `0` means "no signal" here.
 function _signal_name(sig::Union{Nothing,Int})
-    sig === nothing && return nothing
+    (sig === nothing || sig <= 0) && return nothing
     return get(_SIGNAL_NAMES, sig, "signal $sig")
+end
+
+# Windows reports fatal errors as NTSTATUS exit codes (e.g. `0xC0000005` for an access
+# violation), which Julia surfaces as a negative `Int32`; show the hex form as well since that
+# is what people recognise.
+function _exit_code_string(exit_code::Int)
+    if exit_code < 0 && exit_code >= typemin(Int32)
+        return string("exit code ", exit_code, " (0x", uppercase(string(reinterpret(UInt32, Int32(exit_code)), base=16, pad=8)), ")")
+    else
+        return "exit code $exit_code"
+    end
 end
 
 function _exit_info_string(exit_code::Union{Nothing,Int}, term_signal::Union{Nothing,Int})
@@ -1966,7 +1979,7 @@ function _exit_info_string(exit_code::Union{Nothing,Int}, term_signal::Union{Not
     if sig !== nothing
         return "$sig (signal $term_signal)"
     elseif exit_code !== nothing
-        return "exit code $exit_code"
+        return _exit_code_string(exit_code)
     else
         return nothing
     end
