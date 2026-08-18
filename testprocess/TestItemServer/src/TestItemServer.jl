@@ -1268,7 +1268,19 @@ function serve(pipename, debug_pipename, error_handler=nothing)
     end
 
     while true
-        msg = JSONRPC.get_next_message(endpoint)
+        msg = try
+            JSONRPC.get_next_message(endpoint)
+        catch err
+            if err isa JSONRPC.TransportError || err isa JSONRPC.JSONRPCError
+                # The controller went away (its client exited, or it crashed). Nobody will
+                # ever send `testserver/shutdown` now, so leave instead of lingering as an
+                # orphan; nothing here is worth reporting as a crash.
+                @info "Connection to the test item controller was lost; exiting."
+                stop_watchdog!()
+                exit(0)
+            end
+            rethrow()
+        end
 
         if msg.method == "testserver/shutdown"
             dispatch_msg(endpoint, msg, state)
