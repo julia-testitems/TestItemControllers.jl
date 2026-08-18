@@ -81,15 +81,17 @@ mutable struct JSONRPCTestItemController
         # (e.g. client disconnected), we must not let the exception propagate
         # because it would interrupt the reactor's handle!() mid-execution and
         # could prevent _check_testrun_complete!() from being reached.
+        #
+        # No exception may escape here, whatever its type. A closed endpoint surfaces as a
+        # `TransportError` while its read/write tasks are winding down but as a plain
+        # `ErrorException` ("Endpoint is not running") once they are gone — and that second
+        # form used to be rethrown, which killed the reactor in the middle of the very
+        # shutdown that a client hangup triggers, leaving every test process orphaned.
         function _safe_send(args...)
             try
                 JSONRPC.send(jr.endpoint, args...)
             catch err
-                if err isa JSONRPC.TransportError || err isa JSONRPC.JSONRPCError
-                    @debug "JSONRPC callback send failed (endpoint closed?)" exception=(err,)
-                else
-                    rethrow()
-                end
+                @debug "JSONRPC callback send failed (endpoint closed?)" exception=(err,)
             end
         end
 
@@ -280,9 +282,15 @@ function terminate_test_process_request(params::TestItemControllerProtocol.Termi
     terminate_test_process(json_controller.controller, params.testProcessId)
 end
 
+function shutdown_notification(params::Nothing, json_controller::JSONRPCTestItemController)
+    @info "Shutdown requested by client"
+    shutdown(json_controller.controller)
+end
+
 JSONRPC.@message_dispatcher dispatch_msg begin
     TestItemControllerProtocol.create_testrun_request_type => create_testrun_request
     TestItemControllerProtocol.terminate_test_process_request_type => terminate_test_process_request
+    TestItemControllerProtocol.shutdown_notification_type => shutdown_notification
 end
 
 function Base.run(jr_controller::JSONRPCTestItemController)
@@ -304,11 +312,17 @@ function Base.run(jr_controller::JSONRPCTestItemController)
         end
     catch err
         if err isa JSONRPC.TransportError || err isa JSONRPC.JSONRPCError
-            @debug "JSONRPC message loop ended" reason=err.msg
+            @info "Client connection closed; shutting down controller and test processes" reason=err.msg
         else
             bt = catch_backtrace()
-            @error "Error in JSONRPC message loop" exception=(err, bt)
+            @error "Error in JSONRPC message loop; shutting down controller and test processes" exception=(err, bt)
         end
+    finally
+        # Whatever ended the message loop — the client exiting, crashing, or an unexpected
+        # error — nobody is going to send us `shutdown` any more. Without this the reactor
+        # below blocks forever and every test process we spawned outlives its client.
+        # `shutdown` is idempotent, so this is harmless if the client did ask first.
+        shutdown(jr_controller.controller)
     end
 
     run(jr_controller.controller)

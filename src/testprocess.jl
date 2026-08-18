@@ -142,6 +142,31 @@ function _wait_for_self_exit(p::Base.Process, timeout_secs::Real)
     return !process_running(p)
 end
 
+# Bring a child down and *wait until it is actually gone*, escalating if it does not go on
+# its own. `kill` alone is SIGTERM (TerminateProcess on Windows), which a child that is busy
+# in non-yielding code, or that has SIGTERM blocked, can sit through indefinitely. Every
+# caller that afterwards reports the process as terminated must go through here first:
+# posting `TestProcessTerminatedMsg` for a child that is still alive makes the controller
+# forget it, so nothing ever kills it — that is exactly how test processes outlived VS Code.
+function _terminate_and_wait!(jl_process::Base.Process, testprocess_id; grace::Real=5.0)
+    if process_running(jl_process)
+        try kill(jl_process) catch end # Windows throws if it is already dead.
+    end
+    if process_running(jl_process) && !_wait_for_self_exit(jl_process, grace)
+        @warn "Test process did not exit after SIGTERM; killing it" testprocess_id
+        try
+            @static if Sys.iswindows()
+                kill(jl_process)
+            else
+                kill(jl_process, Base.SIGKILL)
+            end
+        catch
+        end
+    end
+    try wait(jl_process) catch end
+    return nothing
+end
+
 struct TestProcessCrashException <: Exception
     testprocess_id::String
     exitcode::Union{Int,Nothing}
@@ -412,6 +437,10 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
                                 dispatch_testprocess_msg(endpoint, msg, (reactor_channel, ps))
                             end
 
+                            # The loop only ends on cancellation, i.e. after the registration
+                            # above SIGTERMed the child. Make sure it is really gone before we
+                            # tell the controller so.
+                            _terminate_and_wait!(jl_process, testprocess_id)
                             put!(reactor_channel, TestProcessTerminatedMsg(testprocess_id, ps.testrun_id, ps.skip_remaining_on_termination))
                         finally
                             close(endpoint)
@@ -446,27 +475,15 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
                     # running *and* has not begun to exit; give a self-exiting one a moment
                     # to finish reporting how it ended.
                     if process_running(jl_process)
-                        _wait_for_self_exit(jl_process, 5.0) ||
-                            (try kill(jl_process) catch end) # Windows throws if it is already dead.
+                        _wait_for_self_exit(jl_process, 5.0)
                     end
-                    # `kill` is SIGTERM, which a wedged child can sit through indefinitely, and
-                    # a bare `wait` here would then never post the message below — leaving the
-                    # controller with a process it believes is alive and, at shutdown, a
-                    # reactor waiting for a termination that cannot come. Escalate.
-                    if process_running(jl_process) && !_wait_for_self_exit(jl_process, 5.0)
-                        @warn "Test process did not exit after SIGTERM; killing it" testprocess_id
-                        try
-                            @static if Sys.iswindows()
-                                kill(jl_process)
-                            else
-                                kill(jl_process, Base.SIGKILL)
-                            end
-                        catch
-                        end
-                    end
-                    wait(jl_process)
+                    # SIGTERM, then SIGKILL if it sits through that, then wait: a wedged child
+                    # must not leave the controller believing a process is alive that will
+                    # never report, nor forgetting one that is still running.
+                    _terminate_and_wait!(jl_process, testprocess_id)
                     put!(reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal, jl_process.exitcode, jl_process.termsignal))
                 else
+                    _terminate_and_wait!(jl_process, testprocess_id)
                     put!(reactor_channel, TestProcessTerminatedMsg(testprocess_id, ps.testrun_id, ps.skip_remaining_on_termination))
                 end
             finally

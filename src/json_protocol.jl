@@ -83,6 +83,10 @@ end
 
 const terminate_test_process_request_type = RequestType("terminateTestProcess", TerminateTestProcessParams, Nothing)
 
+# Client -> controller. Graceful shutdown: cancels every run, terminates every test process
+# (force-killing those that do not exit within the grace period) and then lets `run` return.
+const shutdown_notification_type = NotificationType("shutdown", Nothing)
+
 @dict_readable struct TestMessageStackFrame <: JSONRPC.Outbound
     label::String
     uri::Union{Missing,String}

@@ -289,6 +289,61 @@
            env_content_hash=discovered.env_content_hash)
     end
 
+    """
+        build_create_testrun_params(testrun_id, test_env, items, setups; max_procs=1, log_level="Debug")
+
+    The wire-level `CreateTestRunParams` for running `items` in `test_env` over JSON-RPC, as a
+    client of `JSONRPCTestItemController` would send it.
+    """
+    function build_create_testrun_params(testrun_id::AbstractString, test_env::TestEnvironment, items, setups; max_procs::Int=1, log_level::AbstractString="Debug")
+        TestItemControllerProtocol.CreateTestRunParams(
+            testRunId = String(testrun_id),
+            testEnvironments = [TestItemControllerProtocol.TestEnvironment(
+                id = test_env.id,
+                juliaCmd = test_env.julia_cmd,
+                juliaArgs = test_env.julia_args,
+                juliaNumThreads = something(test_env.julia_num_threads, missing),
+                juliaEnv = test_env.julia_env,
+                mode = test_env.mode,
+                packageName = test_env.package_name,
+                packageUri = test_env.package_uri,
+                projectUri = (test_env.project_uri === nothing ? missing : test_env.project_uri),
+                envContentHash = (test_env.env_content_hash === nothing ? missing : test_env.env_content_hash),
+            )],
+            testItems = [TestItemControllerProtocol.TestItemDetail(
+                id = item.id,
+                uri = item.uri,
+                label = item.label,
+                packageName = item.package_name,
+                packageUri = item.package_uri,
+                useDefaultUsings = item.option_default_imports,
+                testSetups = item.test_setups,
+                line = item.line,
+                column = item.column,
+                code = item.code,
+                codeLine = item.code_line,
+                codeColumn = item.code_column,
+            ) for item in items],
+            workUnits = [TestItemControllerProtocol.TestRunItem(
+                testitemId = item.id,
+                testEnvId = test_env.id,
+                timeout = missing,
+                logLevel = String(log_level),
+            ) for item in items],
+            testSetups = [TestItemControllerProtocol.TestSetupDetail(
+                packageUri = s.package_uri,
+                name = s.name,
+                kind = s.kind,
+                uri = s.uri,
+                line = s.line,
+                column = s.column,
+                code = s.code,
+            ) for s in setups],
+            maxProcessCount = max_procs,
+            coverageRootUris = missing,
+        )
+    end
+
     function run_testrun(discovered::NamedTuple; kwargs...)
         run_testrun(discovered.items, discovered.setups; _env_kwargs(discovered)..., kwargs...)
     end
