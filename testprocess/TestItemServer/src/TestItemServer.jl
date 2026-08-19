@@ -426,10 +426,65 @@ end
 # the closing parenthesis.
 parenthesized_skip_code(skip::AbstractString) = string("(\n", skip, "\n)")
 
+"""
+    release_module_globals!(mod)
+
+Point every global in `mod` at `nothing`, so that whatever the test item bound to one
+becomes collectable.
+
+Every test item runs in a module of its own, and Julia cannot unload a module: the module
+stays reachable for the life of the test process, and so does everything its globals point
+at. A test item that binds a large array therefore keeps that array alive for every later
+item on the same process, which is what julia-testitems/TestItemRunner.jl#65 reports. The
+module object itself still leaks — nothing can be done about that — but its contents do
+not have to.
+
+Left alone: `eval`, `include` and the module's own name, which the `module` expression
+created rather than the test item, and submodules, because a `@testmodule` reached through
+one is shared with other test items. Bindings that cannot take `nothing` — a `const` on
+Julia before 1.12, a typed global, a name brought in by `using` — are skipped as they come
+up, because there is nothing else to try for them.
+"""
+function release_module_globals!(mod::Module)
+    for name in names(mod; all=true)
+        (name === :eval || name === :include || name === nameof(mod)) && continue
+        # Names Julia generated itself, for closures, generators and macro hygiene
+        occursin('#', string(name)) && continue
+        isdefined(mod, name) || continue
+
+        try
+            getfield(mod, name) isa Module && continue
+            # `Core.eval` rather than `setglobal!`, which only exists from Julia 1.9 on
+            Core.eval(mod, Expr(:(=), name, nothing))
+        catch
+        end
+    end
+
+    return nothing
+end
+
 # `testcode_module_parent` exists for the precompile workload: during package-image
 # generation `Main` is closed, so the throwaway module holding the test code must be
 # created inside the (still open) TestItemServer module instead.
 function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode::String, coverage_root_uris::Union{Nothing,Vector{String}}, state::TestProcessState; testcode_module_parent::Module=Main)
+    # The modules created for this test item, emptied once it is done with them. They are
+    # collected here rather than cleared where they are created because `_run_testitem`
+    # returns from a dozen places.
+    testcode_modules = Module[]
+
+    try
+        return _run_testitem(endpoint, params, mode, coverage_root_uris, state, testcode_modules; testcode_module_parent=testcode_module_parent)
+    finally
+        for m in testcode_modules
+            # `invokelatest` is load bearing: the test item's globals were created by an
+            # `include_string` in a newer world, and from this one `names(m; all=true)`
+            # does not list them yet, so a direct call would find nothing to release.
+            Base.invokelatest(release_module_globals!, m)
+        end
+    end
+end
+
+function _run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode::String, coverage_root_uris::Union{Nothing,Vector{String}}, state::TestProcessState, testcode_modules::Vector{Module}; testcode_module_parent::Module=Main)
     JSONRPC.send(
         endpoint,
         TestItemServerProtocol.started_notification_type,
@@ -453,6 +508,7 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
 
         try
             skip_module = Core.eval(testcode_module_parent, :(module $(gensym()) end))
+            push!(testcode_modules, skip_module)
             skip_result = Base.invokelatest(
                 include_string,
                 skip_module,
@@ -610,6 +666,7 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
     end
 
     mod = Core.eval(testcode_module_parent, :(module $(gensym()) end))
+    push!(testcode_modules, mod)
 
     if params.useDefaultUsings
         try
