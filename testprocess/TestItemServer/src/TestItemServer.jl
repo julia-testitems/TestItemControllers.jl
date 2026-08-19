@@ -9,6 +9,34 @@ import Test, Pkg, Sockets
 import Logging
 
 include("../../../shared/testserver_protocol.jl")
+
+"""
+A crash-reporting handler that returns instead of ending the process, or `nothing` when
+this process is running outside VS Code.
+
+Distinct from the `error_handler` `serve` takes: that one is for failures the process cannot
+continue past and it exits when it is done reporting. This one is for failures worth knowing
+about that the caller can carry on from. It is a global because the frames that need it are
+reached from deep inside test execution, where there is nothing to thread a handler through.
+"""
+const NONFATAL_ERROR_HANDLER = Ref{Any}(nothing)
+
+"""
+    report_error(err, bt)
+
+Report an exception the caller is going to carry on past. A no-op outside VS Code.
+"""
+function report_error(err, bt)
+    handler = NONFATAL_ERROR_HANDLER[]
+    handler === nothing && return nothing
+    try
+        Base.invokelatest(handler, err, bt)
+    catch
+        # Reporting a crash must never be the thing that causes one.
+    end
+    return nothing
+end
+
 include("helper.jl")
 include("scratch_env.jl")
 include("watchdog.jl")
@@ -263,7 +291,9 @@ function clear_coverage_data()
         try
             @ccall jl_clear_coverage_data()::Cvoid
         catch err
-            # TODO Call global error handler
+            # Coverage for the next item will be polluted by this one's counters, which is
+            # wrong but not worth failing the run over. Report it so it can be fixed.
+            report_error(err, catch_backtrace())
         end
     end
 end
@@ -346,7 +376,10 @@ function with_captured_output(f, out::Base.RefValue{String})
         close(wr)
         out[] = try
             truncate_setup_output(fetch(reader))
-        catch
+        catch err
+            # Losing the setup's captured output makes a failing setup much harder to
+            # diagnose, so this is worth a report even though we can carry on without it.
+            report_error(err, catch_backtrace())
             ""
         end
         close(rd)
@@ -1127,6 +1160,34 @@ function activate_env_request(params::TestItemServerProtocol.ActivateEnvParams, 
             TestEnv.activate(params.packageName)
         end
 
+        # The controller serializes this request: one test process is nominated to activate
+        # while every other one waits, and they are released when it reports back. The point
+        # of that is to build the test environment's precompile caches exactly once, because
+        # Julia has no cache file locking before 1.10 — two processes precompiling the same
+        # package race, and on Windows the loser cannot replace a `.ji` the winner holds
+        # open, so it dies with "Cannot write cache file".
+        #
+        # From Julia 1.9 on, `TestEnv.activate` finishes with `Pkg._auto_precompile` on the
+        # sandbox environment, so the caches really are built inside that window. The older
+        # variants stop at `Pkg.activate`, and `Pkg.instantiate` did not precompile before
+        # Julia 1.6 either — so nothing was compiled until the first `using` inside a test
+        # item, which happens in every test process at once, after the gate has let them all
+        # go. Precompiling here puts that work back inside the serialized window.
+        @static if VERSION < v"1.9"
+            try
+                # `Pkg.precompile` does not exist before Julia 1.4 — it only became a
+                # forwarder to `Pkg.API.precompile` then, and before that the name resolved
+                # to `Base.precompile` through the implicit `using Base` and threw a
+                # MethodError. `Pkg.API.precompile()` has a zero-argument method in every
+                # version this branch runs on.
+                Pkg.API.precompile()
+            catch err
+                # Not worth failing activation over: whatever is wrong will come back with a
+                # better message when a test item loads the package.
+                @debug "Precompiling the test environment failed" exception = (err, catch_backtrace())
+            end
+        end
+
         return TestItemServerProtocol.ActivateEnvResult(
             status = "success",
             error = missing
@@ -1339,7 +1400,9 @@ function runner_loop(state::TestProcessState)
     end
 end
 
-function serve(pipename, debug_pipename, error_handler=nothing)
+function serve(pipename, debug_pipename, error_handler=nothing, nonfatal_error_handler=nothing)
+    NONFATAL_ERROR_HANDLER[] = nonfatal_error_handler
+
     # Started before anything else touches the load path: `Profile` has to be resolved
     # while `@stdlib` is still reachable, i.e. before the first `activate_env_request`.
     start_watchdog!()

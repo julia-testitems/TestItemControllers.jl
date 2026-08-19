@@ -1,3 +1,7 @@
+# Shutdown normally completes as soon as every process has reported its termination — a
+# few hundred milliseconds. This is the backstop for the case where one never does.
+const DEFAULT_SHUTDOWN_GRACE_SECONDS = 30.0
+
 """
     TestItemController(callbacks; error_handler_file=nothing, crash_reporting_pipename=nothing, log_level=:Info)
 
@@ -34,10 +38,6 @@ the reactor event loop, then use [`execute_testrun`](@ref) to submit work.
 See also [`ControllerCallbacks`](@ref), [`execute_testrun`](@ref), [`shutdown`](@ref),
 [`wait_for_shutdown`](@ref).
 """
-# Shutdown normally completes as soon as every process has reported its termination — a
-# few hundred milliseconds. This is the backstop for the case where one never does.
-const DEFAULT_SHUTDOWN_GRACE_SECONDS = 30.0
-
 mutable struct TestItemController{CB<:ControllerCallbacks}
     callbacks::CB
 
@@ -2305,7 +2305,7 @@ function _activate_env!(c::TestItemController, ps::TestProcessState)
         if err isa JSONRPC.TransportError
             @debug "Activation failed (transport error, likely cancelled)" testprocess_id=ps.id exception=(err, catch_backtrace())
         else
-            @error "Error activating environment" testprocess_id=ps.id exception=(err, catch_backtrace())
+            @warn "Error activating environment" testprocess_id=ps.id exception=(err, catch_backtrace())
             try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal)) catch end
         end
     end
@@ -2345,7 +2345,7 @@ function _configure_testrun!(c::TestItemController, ps::TestProcessState)
         if err isa JSONRPC.TransportError
             @debug "Configuration failed (transport error, likely cancelled)" testprocess_id=ps.id exception=(err, catch_backtrace())
         else
-            @error "Error configuring test run" testprocess_id=ps.id exception=(err, catch_backtrace())
+            @warn "Error configuring test run" testprocess_id=ps.id exception=(err, catch_backtrace())
             try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal)) catch end
         end
     end
@@ -2410,7 +2410,7 @@ function _send_run_testitems!(c::TestItemController, ps::TestProcessState, items
         if err isa JSONRPC.TransportError
             @debug "Run failed (transport error, likely cancelled)" testprocess_id=ps.id exception=(err, catch_backtrace())
         else
-            @error "Error running testitems" testprocess_id=ps.id exception=(err, catch_backtrace())
+            @warn "Error running testitems" testprocess_id=ps.id exception=(err, catch_backtrace())
             try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal)) catch end
         end
     end
@@ -2437,7 +2437,8 @@ function _send_steal!(c::TestItemController, ps::TestProcessState, testitem_ids:
         if err isa JSONRPC.TransportError
             @debug "Steal failed (transport error, likely cancelled)" testprocess_id=ps.id exception=(err, catch_backtrace())
         else
-            @error "Error stealing testitems" testprocess_id=ps.id exception=(err, catch_backtrace())
+            @warn "Error stealing testitems" testprocess_id=ps.id exception=(err, catch_backtrace())
+            try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal)) catch end
         end
     end
 end
@@ -2474,7 +2475,7 @@ function _start_revise!(c::TestItemController, ps::TestProcessState, new_env_has
         if err isa JSONRPC.TransportError
             @debug "Revise failed (transport error, likely cancelled)" testprocess_id=ps.id exception=(err, catch_backtrace())
         else
-            @error "Error during revise" testprocess_id=ps.id exception=(err, catch_backtrace())
+            @warn "Error during revise" testprocess_id=ps.id exception=(err, catch_backtrace())
         end
         try put!(c.reactor_channel, TestProcessReviseResultMsg(ps.id, true)) catch end
     end
@@ -2529,7 +2530,8 @@ matched the wrong `TestEnvironment` when several share identical `ProcessEnv` fi
 would leave the item unresolvable and hang the run.
 """
 function _log_unexpected_missing_work(tr::TestRunState, testitem_id::String, proc_id::String, test_env_id::String, kind::String)
-    @error "Dropping '$(kind)' result for test item '$(testitem_id)' from its owning test process '$(proc_id)': no work unit for env '$(test_env_id)'. This is an internal inconsistency." known_envs=[e.id for e in tr.test_environments]
+    msg = "Dropping '$(kind)' result for test item '$(testitem_id)' from its owning test process '$(proc_id)': no work unit for env '$(test_env_id)'. This is an internal inconsistency."
+    @error msg known_envs=[e.id for e in tr.test_environments] exception=(ErrorException(msg), backtrace())
 end
 
 """
@@ -2542,7 +2544,8 @@ Diagnostic only — it reports nothing to callbacks and changes no state.
 function _check_all_items_reported(tr::TestRunState)
     unreported = [k[1] for k in keys(tr.test_items) if k[1] ∉ tr.reported_items]
     if !isempty(unreported)
-        @error "Test run '$(tr.id)' is completing with $(length(unreported)) test item(s) that never produced a result. Consumers will show them as still running." unreported=sort(unreported)
+        msg = "Test run '$(tr.id)' is completing with $(length(unreported)) test item(s) that never produced a result. Consumers will show them as still running."
+        @error msg unreported=sort(unreported) exception=(ErrorException(msg), backtrace())
     end
     return unreported
 end
