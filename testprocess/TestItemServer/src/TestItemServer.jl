@@ -7,6 +7,7 @@ import .CoverageTools: LCOV, amend_coverage_from_src!
 import .CancellationTokens: CancellationToken
 import Test, Pkg, Sockets
 import Logging
+import Profile
 
 include("../../../shared/testserver_protocol.jl")
 
@@ -1365,8 +1366,8 @@ end
 function serve(pipename, debug_pipename, error_handler=nothing, nonfatal_error_handler=nothing)
     NONFATAL_ERROR_HANDLER[] = nonfatal_error_handler
 
-    # Started before anything else touches the load path: `Profile` has to be resolved
-    # while `@stdlib` is still reachable, i.e. before the first `activate_env_request`.
+    # Started before anything else, so that a hang anywhere in the run — including one in
+    # the very first `activate_env_request` — still leaves diagnostics behind.
     start_watchdog!()
 
     if debug_pipename!==nothing

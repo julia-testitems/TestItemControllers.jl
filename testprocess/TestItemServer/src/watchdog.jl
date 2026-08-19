@@ -37,7 +37,6 @@ const WATCHDOG_POLL_SECONDS = 0.05
 const WATCHDOG_PROFILE_SECONDS = 1.0
 
 const WATCHDOG_FILE = Ref{Union{Nothing,String}}(nothing)
-const WATCHDOG_PROFILE = Ref{Union{Nothing,Module}}(nothing)
 # `time()` at which to dump, or 0.0 when disarmed. Written by the runner loop, read by the
 # watchdog thread; a torn read would at worst dump early or late.
 const WATCHDOG_DEADLINE = Ref{Float64}(0.0)
@@ -50,39 +49,12 @@ const WATCHDOG_STOP = Ref{Bool}(false)
 
 function _init_watchdog_globals!()
     WATCHDOG_FILE[] = nothing
-    WATCHDOG_PROFILE[] = nothing
     WATCHDOG_DEADLINE[] = 0.0
     WATCHDOG_ITEM_ID[] = ""
     WATCHDOG_ITEM_TIMEOUT_MS[] = 0.0
     WATCHDOG_RUNNING[] = false
     WATCHDOG_STOP[] = false
     return nothing
-end
-
-# `Profile` is a stdlib, but the test process runs in a pinned environment
-# (`testprocess/environments/v*`) whose manifest does not list it, so `import Profile` in this
-# package would not resolve. It is therefore loaded at runtime — and by UUID, not by name.
-#
-# By name (`Base.require(Main, :Profile)`) the lookup goes through the load path, which only
-# reaches a stdlib while `@stdlib` is on it. That held for the case this was written for — VS
-# Code launching the process, watchdog started before any test environment is activated — but
-# not for a controller embedded in something that pins `JULIA_LOAD_PATH`, which `Pkg.test` does:
-# the test process inherited a load path of the test environment alone, the lookup raised
-# "Package Profile not found in current path", and every hang dump quietly degraded to
-# "No CPU profile: the Profile stdlib is not loadable in this test process." A stdlib is
-# locatable by its UUID whatever the load path says, which is what we want — this is
-# diagnostics, not a dependency of the environment under test.
-#
-# If it ever genuinely cannot be loaded we still degrade to a text-only dump instead of failing.
-const PROFILE_PKGID = Base.PkgId(Base.UUID("9abbd945-dff8-562f-b5e8-e1ebf5ef1b79"), "Profile")
-
-function _load_profile_module()
-    return try
-        Base.require(PROFILE_PKGID)
-    catch err
-        @debug "Profile is not loadable in this test process; hang diagnostics will be text only" exception=err
-        nothing
-    end
 end
 
 function _write_diagnostics(text::AbstractString)
@@ -100,10 +72,20 @@ function _write_diagnostics(text::AbstractString)
     return nothing
 end
 
-function _capture_profile(prof::Module)
-    prof.init(n = 10^7, delay = 0.005)
-    prof.clear()
-    prof.start_timer()
+# `Profile` is a declared dependency of this package, which means it also has to be in the
+# manifest of every pinned environment the test process runs in (`testprocess/environments/v*`
+# — regenerate them with `scripts/update_app_environments.jl` and never let one drift). The
+# alternative, loading it at runtime with `Base.require(Main, :Profile)`, was what this used to
+# do, on the grounds that the pinned environments did not list it. A by-name lookup goes through
+# the load path and only reaches a stdlib while `@stdlib` is on it, so under any host that pins
+# `JULIA_LOAD_PATH` — `Pkg.test`, i.e. our own CI — it failed and every hang dump silently lost
+# its profile. Resolving through the manifest does not care about the load path, and being
+# imported at precompile time it also keeps the sampler out of the world-age trouble a runtime
+# `require` caused for the watchdog task.
+function _capture_profile()
+    Profile.init(n = 10^7, delay = 0.005)
+    Profile.clear()
+    Profile.start_timer()
     try
         t0 = time()
         while time() - t0 < WATCHDOG_PROFILE_SECONDS
@@ -111,7 +93,7 @@ function _capture_profile(prof::Module)
             GC.safepoint()  # same reason as in `_watchdog_loop`
         end
     finally
-        prof.stop_timer()
+        Profile.stop_timer()
     end
 
     io = IOContext(IOBuffer(), :displaysize => (24, 200))
@@ -119,9 +101,9 @@ function _capture_profile(prof::Module)
     # about Windows sampling only the main thread — neither belongs in a test item's output.
     Logging.with_logger(Logging.NullLogger()) do
         try
-            prof.print(io; groupby = :thread, C = false, maxdepth = 40)
+            Profile.print(io; groupby = :thread, C = false, maxdepth = 40)
         catch err
-            prof.print(io; C = false, maxdepth = 40)
+            Profile.print(io; C = false, maxdepth = 40)
         end
     end
     return String(take!(io.io))
@@ -219,25 +201,15 @@ end
 function _dump_profile()
     io = IOBuffer()
     println(io, "CPU profile")
-    prof = WATCHDOG_PROFILE[]
-    if prof === nothing
-        println(io, "No CPU profile: the Profile stdlib is not loadable in this test process.")
-    else
-        try
-            # `Profile` is loaded by `Base.require` inside `start_watchdog!`, i.e. after that
-            # frame's world age was fixed, and the spawned watchdog task inherits that stale
-            # world. Calling `prof.init` etc. from it fails with "method too new to be called
-            # from this world context" (seen on 1.12). `invokelatest` runs the whole capture in
-            # the current world.
-            profile_text = Base.invokelatest(_capture_profile, prof)
-            if isempty(strip(profile_text))
-                println(io, "No CPU profile: the sampler collected no snapshots.")
-            else
-                print(io, profile_text)
-            end
-        catch err
-            println(io, "No CPU profile: capturing one failed with ", sprint(showerror, err))
+    try
+        profile_text = _capture_profile()
+        if isempty(strip(profile_text))
+            println(io, "No CPU profile: the sampler collected no snapshots.")
+        else
+            print(io, profile_text)
         end
+    catch err
+        println(io, "No CPU profile: capturing one failed with ", sprint(showerror, err))
     end
     println(io, DUMP_RULE)
     return String(take!(io))
@@ -305,7 +277,7 @@ end
 """
     start_watchdog!()
 
-Load the diagnostics file path and the `Profile` module and start the watchdog thread.
+Load the diagnostics file path and start the watchdog thread.
 Returns `true` when the watchdog is running. Called once, at test process startup, while
 the process is still healthy.
 """
@@ -315,7 +287,6 @@ function start_watchdog!()
     file = get(ENV, DIAGNOSTICS_FILE_ENV_VAR, "")
     isempty(file) && return false
     WATCHDOG_FILE[] = file
-    WATCHDOG_PROFILE[] = _load_profile_module()
 
     @static if VERSION >= v"1.9"
         # Preferred: our own interactive thread, which the default pool cannot starve.
