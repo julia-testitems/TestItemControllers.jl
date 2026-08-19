@@ -196,6 +196,10 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
                 push!(jlArgs, "--check-bounds=$(env.check_bounds)")
             end
 
+            # Without this the test process would see a pipe rather than a terminal and
+            # turn color off, so nothing a test item prints could ever carry it.
+            env.color && push!(jlArgs, "--color=yes")
+
             # Reserve the watchdog's interactive thread where the Julia version supports it,
             # otherwise keep the pre-existing behaviour exactly (the watchdog then degrades
             # to "no diagnostic dump", which `start_watchdog!` handles).
@@ -371,7 +375,11 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
                     if err isa CancellationTokens.OperationCanceledException
                         @debug "Output reading cancelled by token" testprocess_id
                     else
-                        @error "Error reading test process output" testprocess_id exception=(err, catch_backtrace())
+                        # A warning, not an error: the process itself is unaffected and
+                        # keeps reporting results over JSON-RPC — only its console output
+                        # stops being forwarded. Under the crash-reporting logger an
+                        # `@error` here would take the whole controller down with it.
+                        @warn "Error reading test process output; output from this process will no longer be forwarded" testprocess_id exception=(err, catch_backtrace())
                     end
                 end
 
@@ -401,7 +409,10 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
                         end                        
                     end
                 catch err
-                    @error "Error waiting for test process exit" testprocess_id exception=(err, catch_backtrace())
+                    # Same reasoning as the output reader: losing the exit-code observation
+                    # degrades the termination classification below, it does not justify
+                    # killing the controller.
+                    @warn "Error waiting for test process exit" testprocess_id exception=(err, catch_backtrace())
                 end
 
                 accept_combined_token = CancellationTokens.get_token(CancellationTokens.CancellationTokenSource(token, abort_accept_due_to_startup_failure_token))
@@ -464,6 +475,13 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
                     end
                 end
             catch err
+                if err isa TestProcessCrashException && !isempty(err.captured_output)
+                    # The only record of why a process died before it could connect. It is
+                    # dropped on the floor below, where all that survives is an exit code,
+                    # so surface it here while we still have it.
+                    @warn "Test process crashed during startup" testprocess_id exitcode=err.exitcode termsignal=err.termsignal output=err.captured_output
+                end
+
                 if !(err isa CancellationTokens.OperationCanceledException)
                     # A pipe error is very often the *worker* closing its end because it is
                     # exiting on its own — a memory recycle's `exit(66)`, say. Killing it

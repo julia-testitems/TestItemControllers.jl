@@ -288,6 +288,20 @@ function _watchdog_loop()
     return nothing
 end
 
+# Nothing waits on the watchdog task, so an exception anywhere outside `_write_dump`'s own
+# `try` would end it silently while `WATCHDOG_RUNNING[]` still claimed it was alive — and
+# `stop_watchdog!` would then wait for a thread that is already gone. Report it and leave the
+# flag telling the truth.
+function _guarded_watchdog_loop()
+    try
+        _watchdog_loop()
+    catch err
+        WATCHDOG_RUNNING[] = false
+        report_error(err, catch_backtrace())
+    end
+    return nothing
+end
+
 """
     start_watchdog!()
 
@@ -306,7 +320,7 @@ function start_watchdog!()
     @static if VERSION >= v"1.9"
         # Preferred: our own interactive thread, which the default pool cannot starve.
         if Threads.nthreads(:interactive) >= 2
-            Threads.@spawn :interactive _watchdog_loop()
+            Threads.@spawn :interactive _guarded_watchdog_loop()
             WATCHDOG_RUNNING[] = true
             return true
         end
@@ -316,7 +330,7 @@ function start_watchdog!()
         # Fallback: any spare thread. Weaker, because a test item that saturates the
         # default pool can keep the watchdog off the CPU.
         if Threads.nthreads() >= 2
-            Threads.@spawn _watchdog_loop()
+            Threads.@spawn _guarded_watchdog_loop()
             WATCHDOG_RUNNING[] = true
             return true
         end
