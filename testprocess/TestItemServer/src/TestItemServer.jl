@@ -743,7 +743,12 @@ function _run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mod
                 withpath(testsnippet_filepath) do
                     if mode == "Debug"
                         debug_session = wait_for_debug_session()
-                        DebugAdapter.debug_code(debug_session, mod, testsnippet_code, testsnippet_filepath)
+                        # A setup snippet is not the last thing this session debugs — the
+                        # test item's own body follows — and `terminated` would tell the
+                        # client the debuggee has ended, so it would disconnect before the
+                        # body ran and no breakpoint in the item would ever be hit
+                        # (julia-testitems/TestItemRunner.jl#107).
+                        DebugAdapter.debug_code(debug_session, mod, testsnippet_code, testsnippet_filepath; notify_termination=false)
                     else
                         mode == "Coverage" && clear_coverage_data()
                         # A snippet is re-evaluated into every item's scope, so its output
