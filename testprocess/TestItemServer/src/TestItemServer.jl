@@ -1094,6 +1094,20 @@ end
 
 function activate_env_request(params::TestItemServerProtocol.ActivateEnvParams, state::TestProcessState, token::CancellationToken)
     try
+        # A test process runs tests in an environment the host has already set up, so
+        # refreshing the user's General registry here is a side effect nobody asked for. It
+        # also races: test processes belonging to different controllers reach `Pkg.develop`
+        # and `Pkg.resolve` at the same time, and on Windows one process's open handle makes
+        # another's `unlink` of `registries/General.tar.gz` fail with EBUSY, which fails the
+        # whole activation. The controller's precompile gate cannot help, because it only
+        # serializes the processes of one controller.
+        #
+        # This suppresses the automatic registry update only. A package that is missing from
+        # the depot still gets installed.
+        if isdefined(Pkg, :UPDATED_REGISTRY_THIS_SESSION)
+            Pkg.UPDATED_REGISTRY_THIS_SESSION[] = true
+        end
+
         # We never activate the user's own environment: `TestEnv.activate` runs
         # `Pkg.instantiate` on whatever is active, which writes a `Manifest.toml`
         # into it. Mirror it into a scratch directory instead — see scratch_env.jl.
