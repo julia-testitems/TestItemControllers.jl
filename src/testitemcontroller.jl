@@ -468,6 +468,15 @@ function handle!(c::TestItemController, msg::GetProcsForTestRunMsg)
         return false
     end
 
+    # A run can be cancelled (and, once its completion is signalled, deleted) before this
+    # message is handled: a token that is already cancelled when `execute_testrun` registers
+    # its bridge posts `TestRunCancelledMsg` ahead of this request. Launching processes for
+    # it would leak them and index a run that is gone.
+    if !haskey(c.test_runs, msg.testrun_id) || state(c.test_runs[msg.testrun_id].fsm) == TestRunCancelled
+        @debug "Ignoring GetProcsForTestRunMsg for cancelled or unknown test run" testrun_id=msg.testrun_id
+        return false
+    end
+
     @debug "Acquiring test processes for test run" testrun_id=msg.testrun_id env_count=length(msg.proc_count_by_env)
 
     our_procs = Dict{ProcessEnv,Vector{String}}()

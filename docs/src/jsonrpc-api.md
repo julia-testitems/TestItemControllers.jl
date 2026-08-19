@@ -60,6 +60,19 @@ Kill a specific child process.
 
 **Response**: `null`
 
+## Notifications (client → server)
+
+### `shutdown`
+
+Ask the controller to shut down: every active test run is cancelled, every child
+process is terminated (a process that does not exit within the grace period is
+force-killed), and the controller exits once they are gone. No parameters.
+
+The controller also shuts itself down in exactly the same way when the client's
+connection closes without a `shutdown` — the client exiting or crashing — so test
+processes never outlive their client. Sending `shutdown` first is still preferable:
+it lets the client observe the `testProcessTerminated` notifications.
+
 ## Notifications (server → client)
 
 The controller sends the following notifications as test execution progresses.
