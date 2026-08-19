@@ -118,6 +118,32 @@ function format_error_message(err, bt)
     end
 end
 
+"""
+    resolve_source_file(file) -> Union{Nothing,String}
+
+The absolute path `file` names, or `nothing` when there is no such file on this machine.
+
+A location is only worth reporting if the editor can open what it points at. Two things
+produce paths that do not exist: a relative path recorded for a Base file, which
+`Base.find_source_file` resolves, and an absolute path baked in when Julia was built, which
+nothing can resolve. The second is what a macro expanding to `@test` — `@test_warn` and the
+rest of the `Test` stdlib — reports as the source of a failure, and clicking such a failure
+in VS Code answers "The editor could not be opened because the file was not found"
+(julia-testitems/TestItemRunner.jl#25, JuliaLang/julia#47033).
+"""
+function resolve_source_file(file)
+    path = string(file)
+    isempty(path) && return nothing
+
+    if !isabspath(path)
+        resolved = Base.find_source_file(path)
+        resolved === nothing && return nothing
+        path = resolved
+    end
+
+    return isfile(path) ? path : nothing
+end
+
 function find_error_location(st)
     for frame in st
         frame.from_c && continue
@@ -150,14 +176,12 @@ function backtrace_to_stackframes(bt)
 
         file = string(frame.file)
 
-        if !isabspath(file)
-            resolved = Base.find_source_file(file)
-            if resolved !== nothing
-                file = resolved
-            end
-        end
+        # The unresolved path still decides whether this is an infrastructure frame, so
+        # that a stdlib frame is recognized as one whether or not its file is on disk
+        resolved = resolve_source_file(file)
+        resolved === nothing || (file = resolved)
 
-        uri = isabspath(file) ? filepath2uri(file) : missing
+        uri = resolved === nothing ? missing : filepath2uri(resolved)
         location = uri !== missing ? TestItemServerProtocol.Location(uri, TestItemServerProtocol.Position(frame.line, 1)) : missing
 
         push!(result, TestItemServerProtocol.TestMessageStackFrame(
@@ -210,14 +234,10 @@ function parse_backtrace_string(bt_str::AbstractString)
             line = parse(Int, loc_matches[idx].captures[2])
         end
 
-        if !isempty(file) && !isabspath(file)
-            resolved = Base.find_source_file(file)
-            if resolved !== nothing
-                file = resolved
-            end
-        end
+        resolved = isempty(file) ? nothing : resolve_source_file(file)
+        resolved === nothing || (file = resolved)
 
-        uri = (!isempty(file) && isabspath(file)) ? filepath2uri(file) : missing
+        uri = resolved === nothing ? missing : filepath2uri(resolved)
         location = uri !== missing ? TestItemServerProtocol.Location(uri, TestItemServerProtocol.Position(line, 1)) : missing
 
         push!(result, TestItemServerProtocol.TestMessageStackFrame(
@@ -927,7 +947,7 @@ function _run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mod
                 TestItemServerProtocol.failed_notification_type,
                 TestItemServerProtocol.FailedParams(
                     testItemId = params.id,
-                    messages = [ create_test_message_for_failed(i) for i in failed_tests],
+                    messages = [ create_test_message_for_failed(i, params.uri, params.line) for i in failed_tests],
                     duration = elapsed_time,
                     perf = perf
                 )
@@ -945,7 +965,20 @@ function run_testitems_batch_request(params::TestItemServerProtocol.RunTestItems
     return nothing
 end
 
-function create_test_message_for_failed(i)
+"""
+    create_test_message_for_failed(i, fallback_uri, fallback_line)
+
+Turn one failed `Test` result into the message the client shows, located at
+`fallback_uri:fallback_line` — the test item itself — when the result points at a file that
+is not on this machine.
+
+That happens whenever a macro expands to `@test`: `Test` records the source location of the
+`@test` inside the macro's own implementation, and for a Julia built by the build bots that
+path does not exist here. Reporting the test item instead keeps the failure clickable, at
+the cost of a line number that is the item's rather than the failing call's. See
+[`resolve_source_file`](@ref).
+"""
+function create_test_message_for_failed(i, fallback_uri::AbstractString, fallback_line::Integer)
     (expected, actual) = extract_expected_and_actual(i)
 
     stack_frames = if :backtrace in fieldnames(typeof(i)) && i.backtrace isa AbstractString && !isempty(i.backtrace)
@@ -954,11 +987,16 @@ function create_test_message_for_failed(i)
         missing
     end
 
+    source_file = resolve_source_file(i.source.file)
+    location = source_file === nothing ?
+        TestItemServerProtocol.Location(fallback_uri, TestItemServerProtocol.Position(fallback_line, 1)) :
+        TestItemServerProtocol.Location(filepath2uri(source_file), TestItemServerProtocol.Position(i.source.line, 1))
+
     return TestItemServerProtocol.TestMessage(
         message = Base.invokelatest(sprint, Base.show, i),
         expectedOutput = expected,
         actualOutput = actual,
-        location = TestItemServerProtocol.Location(filepath2uri(string(i.source.file)), TestItemServerProtocol.Position(i.source.line, 1)),
+        location = location,
         stackTrace = stack_frames,
     )
 end
