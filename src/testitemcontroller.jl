@@ -1,3 +1,7 @@
+# Shutdown normally completes as soon as every process has reported its termination — a
+# few hundred milliseconds. This is the backstop for the case where one never does.
+const DEFAULT_SHUTDOWN_GRACE_SECONDS = 30.0
+
 """
     TestItemController(callbacks; error_handler_file=nothing, crash_reporting_pipename=nothing, log_level=:Info)
 
@@ -34,10 +38,6 @@ the reactor event loop, then use [`execute_testrun`](@ref) to submit work.
 See also [`ControllerCallbacks`](@ref), [`execute_testrun`](@ref), [`shutdown`](@ref),
 [`wait_for_shutdown`](@ref).
 """
-# Shutdown normally completes as soon as every process has reported its termination — a
-# few hundred milliseconds. This is the backstop for the case where one never does.
-const DEFAULT_SHUTDOWN_GRACE_SECONDS = 30.0
-
 mutable struct TestItemController{CB<:ControllerCallbacks}
     callbacks::CB
 
