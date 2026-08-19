@@ -543,12 +543,20 @@ function run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mode
             captured_output = Ref("")
             t0 = time_ns()
             try
-                with_captured_output(captured_output) do
-                    withpath(filepath) do
-                        Logging.with_logger(Logging.ConsoleLogger(stderr, state.log_level)) do
-                            Base.invokelatest(include_string, mod, code, filepath)
+                # A `@testmodule` runs real package code (it is where a suite does its
+                # expensive one-time work), so its coverage window matters as much as a
+                # snippet's or the test item's own.
+                mode == "Coverage" && clear_coverage_data()
+                try
+                    with_captured_output(captured_output) do
+                        withpath(filepath) do
+                            Logging.with_logger(Logging.ConsoleLogger(stderr, state.log_level)) do
+                                Base.invokelatest(include_string, mod, code, filepath)
+                            end
                         end
                     end
+                finally
+                    mode == "Coverage" && collect_coverage_data!(coverage_results, coverage_root_uris)
                 end
                 setup_details.duration = (time_ns() - t0) / 1e6 # Convert to milliseconds
                 setup_details.captured_output = captured_output[]

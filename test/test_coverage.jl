@@ -189,3 +189,96 @@ end
         @test result.coverage === nothing
     end
 end
+
+@testitem "Coverage is identical across repeated runs" setup=[TestHelpers] begin
+    if VERSION < v"1.11"
+        @test_skip "Coverage mode requires Julia 1.11+"
+    else
+        using TestItemControllers: filepath2uri
+
+        # julia-vscode#3707: the same unchanged test item reported 100% coverage on the
+        # first run and 27.27% on every later run. A pooled process already holds the
+        # compiler's inference results for the code under test, so calls that can be folded
+        # to a constant are never executed again and their line counters never move. Only a
+        # process that has not run the code before measures it, hence coverage processes are
+        # retired at the end of their test run instead of being pooled.
+        pkg_path = joinpath(TestHelpers.TESTDATA_DIR, "BasicPackage")
+        discovered = TestHelpers.discover_test_items(pkg_path)
+
+        items = filter(i -> i.label == "add works", discovered.items)
+        @test length(items) == 1
+
+        coverage_root = filepath2uri(joinpath(pkg_path, "src"))
+
+        result = TestHelpers.run_testrun(
+            items, discovered.setups, discovered;
+            mode="Coverage",
+            coverage_root_uris=[coverage_root],
+            n_runs=2,
+            timeout=900
+        )
+
+        @test length(result.runs) == 2
+
+        src_uri = filepath2uri(joinpath(pkg_path, "src", "BasicPackage.jl"))
+
+        coverage_vectors = map(result.runs) do r
+            @test r.coverage !== nothing
+            fc = filter(c -> c.uri == src_uri, something(r.coverage, []))
+            @test length(fc) == 1
+            fc[1].coverage
+        end
+
+        @test coverage_vectors[1] == coverage_vectors[2]
+
+        # Each run got its own process, i.e. the first run's process was not pooled.
+        created = filter(e -> e.event == :process_created, result.process_events)
+        @test length(created) == 2
+    end
+end
+
+@testitem "Coverage includes @testmodule setup code" setup=[TestHelpers] begin
+    if VERSION < v"1.11"
+        @test_skip "Coverage mode requires Julia 1.11+"
+    else
+        using TestItemControllers: filepath2uri
+
+        # A `@testmodule` used to be evaluated without a coverage window, so package code
+        # only the setup exercised counted as uncovered.
+        pkg_path = joinpath(TestHelpers.TESTDATA_DIR, "SetupPackage")
+        discovered = TestHelpers.discover_test_items(pkg_path)
+
+        items = filter(i -> i.label == "transform with module setup", discovered.items)
+        @test length(items) == 1
+
+        coverage_root = filepath2uri(joinpath(pkg_path, "src"))
+
+        result = TestHelpers.run_testrun(
+            items, discovered.setups, discovered;
+            mode="Coverage",
+            coverage_root_uris=[coverage_root],
+            timeout=600
+        )
+
+        passed_events = filter(e -> e.event == :passed, result.events)
+        @test length(passed_events) == 1
+
+        src_file = joinpath(pkg_path, "src", "SetupPackage.jl")
+        fc = filter(c -> c.uri == filepath2uri(src_file), something(result.coverage, []))
+        @test length(fc) == 1
+
+        cov = fc[1].coverage
+        src_lines = readlines(src_file)
+
+        # `get_config` is called only from the `ConfigSetup` testmodule, `transform` only
+        # from the test item itself, so both being covered is what proves the setup's
+        # coverage made it into the results.
+        config_line = findfirst(l -> occursin("get_config() =", l), src_lines)
+        transform_line = findfirst(l -> occursin("transform(x, config) =", l), src_lines)
+        @test config_line !== nothing
+        @test transform_line !== nothing
+        @test length(cov) >= max(config_line, transform_line)
+        @test cov[config_line] !== nothing && cov[config_line] > 0
+        @test cov[transform_line] !== nothing && cov[transform_line] > 0
+    end
+end
