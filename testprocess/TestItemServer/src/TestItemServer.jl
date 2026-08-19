@@ -7,8 +7,37 @@ import .CoverageTools: LCOV, amend_coverage_from_src!
 import .CancellationTokens: CancellationToken
 import Test, Pkg, Sockets
 import Logging
+import Profile
 
 include("../../../shared/testserver_protocol.jl")
+
+"""
+A crash-reporting handler that returns instead of ending the process, or `nothing` when
+this process is running outside VS Code.
+
+Distinct from the `error_handler` `serve` takes: that one is for failures the process cannot
+continue past and it exits when it is done reporting. This one is for failures worth knowing
+about that the caller can carry on from. It is a global because the frames that need it are
+reached from deep inside test execution, where there is nothing to thread a handler through.
+"""
+const NONFATAL_ERROR_HANDLER = Ref{Any}(nothing)
+
+"""
+    report_error(err, bt)
+
+Report an exception the caller is going to carry on past. A no-op outside VS Code.
+"""
+function report_error(err, bt)
+    handler = NONFATAL_ERROR_HANDLER[]
+    handler === nothing && return nothing
+    try
+        Base.invokelatest(handler, err, bt)
+    catch
+        # Reporting a crash must never be the thing that causes one.
+    end
+    return nothing
+end
+
 include("helper.jl")
 include("scratch_env.jl")
 include("watchdog.jl")
@@ -118,6 +147,32 @@ function format_error_message(err, bt)
     end
 end
 
+"""
+    resolve_source_file(file) -> Union{Nothing,String}
+
+The absolute path `file` names, or `nothing` when there is no such file on this machine.
+
+A location is only worth reporting if the editor can open what it points at. Two things
+produce paths that do not exist: a relative path recorded for a Base file, which
+`Base.find_source_file` resolves, and an absolute path baked in when Julia was built, which
+nothing can resolve. The second is what a macro expanding to `@test` — `@test_warn` and the
+rest of the `Test` stdlib — reports as the source of a failure, and clicking such a failure
+in VS Code answers "The editor could not be opened because the file was not found"
+(julia-testitems/TestItemRunner.jl#25, JuliaLang/julia#47033).
+"""
+function resolve_source_file(file)
+    path = string(file)
+    isempty(path) && return nothing
+
+    if !isabspath(path)
+        resolved = Base.find_source_file(path)
+        resolved === nothing && return nothing
+        path = resolved
+    end
+
+    return isfile(path) ? path : nothing
+end
+
 function find_error_location(st)
     for frame in st
         frame.from_c && continue
@@ -150,14 +205,12 @@ function backtrace_to_stackframes(bt)
 
         file = string(frame.file)
 
-        if !isabspath(file)
-            resolved = Base.find_source_file(file)
-            if resolved !== nothing
-                file = resolved
-            end
-        end
+        # The unresolved path still decides whether this is an infrastructure frame, so
+        # that a stdlib frame is recognized as one whether or not its file is on disk
+        resolved = resolve_source_file(file)
+        resolved === nothing || (file = resolved)
 
-        uri = isabspath(file) ? filepath2uri(file) : missing
+        uri = resolved === nothing ? missing : filepath2uri(resolved)
         location = uri !== missing ? TestItemServerProtocol.Location(uri, TestItemServerProtocol.Position(frame.line, 1)) : missing
 
         push!(result, TestItemServerProtocol.TestMessageStackFrame(
@@ -210,14 +263,10 @@ function parse_backtrace_string(bt_str::AbstractString)
             line = parse(Int, loc_matches[idx].captures[2])
         end
 
-        if !isempty(file) && !isabspath(file)
-            resolved = Base.find_source_file(file)
-            if resolved !== nothing
-                file = resolved
-            end
-        end
+        resolved = isempty(file) ? nothing : resolve_source_file(file)
+        resolved === nothing || (file = resolved)
 
-        uri = (!isempty(file) && isabspath(file)) ? filepath2uri(file) : missing
+        uri = resolved === nothing ? missing : filepath2uri(resolved)
         location = uri !== missing ? TestItemServerProtocol.Location(uri, TestItemServerProtocol.Position(line, 1)) : missing
 
         push!(result, TestItemServerProtocol.TestMessageStackFrame(
@@ -243,7 +292,9 @@ function clear_coverage_data()
         try
             @ccall jl_clear_coverage_data()::Cvoid
         catch err
-            # TODO Call global error handler
+            # Coverage for the next item will be polluted by this one's counters, which is
+            # wrong but not worth failing the run over. Report it so it can be fixed.
+            report_error(err, catch_backtrace())
         end
     end
 end
@@ -326,7 +377,10 @@ function with_captured_output(f, out::Base.RefValue{String})
         close(wr)
         out[] = try
             truncate_setup_output(fetch(reader))
-        catch
+        catch err
+            # Losing the setup's captured output makes a failing setup much harder to
+            # diagnose, so this is worth a report even though we can carry on without it.
+            report_error(err, catch_backtrace())
             ""
         end
         close(rd)
@@ -932,7 +986,7 @@ function _run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mod
                 TestItemServerProtocol.failed_notification_type,
                 TestItemServerProtocol.FailedParams(
                     testItemId = params.id,
-                    messages = [ create_test_message_for_failed(i) for i in failed_tests],
+                    messages = [ create_test_message_for_failed(i, params.uri, params.line) for i in failed_tests],
                     duration = elapsed_time,
                     perf = perf
                 )
@@ -950,7 +1004,20 @@ function run_testitems_batch_request(params::TestItemServerProtocol.RunTestItems
     return nothing
 end
 
-function create_test_message_for_failed(i)
+"""
+    create_test_message_for_failed(i, fallback_uri, fallback_line)
+
+Turn one failed `Test` result into the message the client shows, located at
+`fallback_uri:fallback_line` — the test item itself — when the result points at a file that
+is not on this machine.
+
+That happens whenever a macro expands to `@test`: `Test` records the source location of the
+`@test` inside the macro's own implementation, and for a Julia built by the build bots that
+path does not exist here. Reporting the test item instead keeps the failure clickable, at
+the cost of a line number that is the item's rather than the failing call's. See
+[`resolve_source_file`](@ref).
+"""
+function create_test_message_for_failed(i, fallback_uri::AbstractString, fallback_line::Integer)
     (expected, actual) = extract_expected_and_actual(i)
 
     stack_frames = if :backtrace in fieldnames(typeof(i)) && i.backtrace isa AbstractString && !isempty(i.backtrace)
@@ -959,11 +1026,16 @@ function create_test_message_for_failed(i)
         missing
     end
 
+    source_file = resolve_source_file(i.source.file)
+    location = source_file === nothing ?
+        TestItemServerProtocol.Location(fallback_uri, TestItemServerProtocol.Position(fallback_line, 1)) :
+        TestItemServerProtocol.Location(filepath2uri(source_file), TestItemServerProtocol.Position(i.source.line, 1))
+
     return TestItemServerProtocol.TestMessage(
         message = Base.invokelatest(sprint, Base.show, i),
         expectedOutput = expected,
         actualOutput = actual,
-        location = TestItemServerProtocol.Location(filepath2uri(string(i.source.file)), TestItemServerProtocol.Position(i.source.line, 1)),
+        location = location,
         stackTrace = stack_frames,
     )
 end
@@ -1065,6 +1137,20 @@ end
 
 function activate_env_request(params::TestItemServerProtocol.ActivateEnvParams, state::TestProcessState, token::CancellationToken)
     try
+        # A test process runs tests in an environment the host has already set up, so
+        # refreshing the user's General registry here is a side effect nobody asked for. It
+        # also races: test processes belonging to different controllers reach `Pkg.develop`
+        # and `Pkg.resolve` at the same time, and on Windows one process's open handle makes
+        # another's `unlink` of `registries/General.tar.gz` fail with EBUSY, which fails the
+        # whole activation. The controller's precompile gate cannot help, because it only
+        # serializes the processes of one controller.
+        #
+        # This suppresses the automatic registry update only. A package that is missing from
+        # the depot still gets installed.
+        if isdefined(Pkg, :UPDATED_REGISTRY_THIS_SESSION)
+            Pkg.UPDATED_REGISTRY_THIS_SESSION[] = true
+        end
+
         # We never activate the user's own environment: `TestEnv.activate` runs
         # `Pkg.instantiate` on whatever is active, which writes a `Manifest.toml`
         # into it. Mirror it into a scratch directory instead — see scratch_env.jl.
@@ -1092,6 +1178,34 @@ function activate_env_request(params::TestItemServerProtocol.ActivateEnvParams, 
 
         if params.packageName!=""
             TestEnv.activate(params.packageName)
+        end
+
+        # The controller serializes this request: one test process is nominated to activate
+        # while every other one waits, and they are released when it reports back. The point
+        # of that is to build the test environment's precompile caches exactly once, because
+        # Julia has no cache file locking before 1.10 — two processes precompiling the same
+        # package race, and on Windows the loser cannot replace a `.ji` the winner holds
+        # open, so it dies with "Cannot write cache file".
+        #
+        # From Julia 1.9 on, `TestEnv.activate` finishes with `Pkg._auto_precompile` on the
+        # sandbox environment, so the caches really are built inside that window. The older
+        # variants stop at `Pkg.activate`, and `Pkg.instantiate` did not precompile before
+        # Julia 1.6 either — so nothing was compiled until the first `using` inside a test
+        # item, which happens in every test process at once, after the gate has let them all
+        # go. Precompiling here puts that work back inside the serialized window.
+        @static if VERSION < v"1.9"
+            try
+                # `Pkg.precompile` does not exist before Julia 1.4 — it only became a
+                # forwarder to `Pkg.API.precompile` then, and before that the name resolved
+                # to `Base.precompile` through the implicit `using Base` and threw a
+                # MethodError. `Pkg.API.precompile()` has a zero-argument method in every
+                # version this branch runs on.
+                Pkg.API.precompile()
+            catch err
+                # Not worth failing activation over: whatever is wrong will come back with a
+                # better message when a test item loads the package.
+                @debug "Precompiling the test environment failed" exception = (err, catch_backtrace())
+            end
         end
 
         return TestItemServerProtocol.ActivateEnvResult(
@@ -1306,9 +1420,11 @@ function runner_loop(state::TestProcessState)
     end
 end
 
-function serve(pipename, debug_pipename, error_handler=nothing)
-    # Started before anything else touches the load path: `Profile` has to be resolved
-    # while `@stdlib` is still reachable, i.e. before the first `activate_env_request`.
+function serve(pipename, debug_pipename, error_handler=nothing, nonfatal_error_handler=nothing)
+    NONFATAL_ERROR_HANDLER[] = nonfatal_error_handler
+
+    # Started before anything else, so that a hang anywhere in the run — including one in
+    # the very first `activate_env_request` — still leaves diagnostics behind.
     start_watchdog!()
 
     if debug_pipename!==nothing

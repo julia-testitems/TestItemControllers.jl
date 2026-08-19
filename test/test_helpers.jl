@@ -99,6 +99,18 @@
         end
     end
 
+    # This is dominated by juliaup fetching an old toolchain and that Julia precompiling into
+    # a fresh depot, which is unbounded on a slow runner — the 32-bit Windows leg times out at
+    # 600s. The deadline is here to catch a hang, not to hold the toolchain to a performance
+    # budget.
+    #
+    # It must stay *below* the per-item deadline the runner executing this suite imposes,
+    # which .github/workflows/juliaci.yml sets to 2400s. Above it, the runner kills the item
+    # first and `run_testrun`'s dump of what every nested test process was doing — the whole
+    # point of having a guard here — never runs. That inversion is how a stalled `Julia 1.10
+    # platform` item on macOS once reported nothing but a bare timeout.
+    const PLATFORM_RUN_TIMEOUT = 1800
+
     """
         check_julia_version(version)
 
@@ -123,11 +135,7 @@
             items, discovered.setups, discovered;
             julia_cmd="julia",
             julia_args=["+$version"],
-            # This is dominated by juliaup fetching an old toolchain and that Julia
-            # precompiling into a fresh depot, which is unbounded on a slow runner — the
-            # 32-bit Windows leg times out at 600s. The deadline is here to catch a hang,
-            # not to hold the toolchain to a performance budget.
-            timeout=1800,
+            timeout=PLATFORM_RUN_TIMEOUT,
             env=isolated_depot_env(version)
         )
 
@@ -267,7 +275,7 @@
         )
     end
 
-    function make_test_environment(; mode="Run", julia_cmd=joinpath(Sys.BINDIR, "julia"), julia_args=String[], env=Dict{String,Union{String,Nothing}}(), package_name="", package_uri="", project_uri=nothing, env_content_hash=nothing)
+    function make_test_environment(; mode="Run", julia_cmd=joinpath(Sys.BINDIR, "julia"), julia_args=String[], env=Dict{String,Union{String,Nothing}}(), package_name="", package_uri="", project_uri=nothing, env_content_hash=nothing, check_bounds=nothing, color::Bool=false)
         TestEnvironment(
             "test-env-1",
             julia_cmd,
@@ -278,7 +286,9 @@
             package_name,
             package_uri,
             project_uri,
-            env_content_hash
+            env_content_hash,
+            check_bounds,
+            color
         )
     end
 
@@ -356,7 +366,7 @@
     # the second run gets the pooled, already-warm test process of the first. `runs` in the
     # returned value holds the per-run events and output; `events`/`outputs` are the union
     # across runs, which is what a single-run caller wants.
-    function run_testrun(items, setups; mode="Run", max_procs=1, timeout=600, coverage_root_uris=nothing, log_level=:Debug, julia_cmd=joinpath(Sys.BINDIR, "julia"), julia_args=String[], env=Dict{String,Union{String,Nothing}}(), item_timeouts=Dict{String,Float64}(), package_name="", package_uri="", project_uri=nothing, env_content_hash=nothing, n_runs=1, gc_between_testitems=nothing, memory_threshold=nothing, shutdown_timeout=60)
+    function run_testrun(items, setups; mode="Run", max_procs=1, timeout=600, coverage_root_uris=nothing, log_level=:Debug, julia_cmd=joinpath(Sys.BINDIR, "julia"), julia_args=String[], env=Dict{String,Union{String,Nothing}}(), item_timeouts=Dict{String,Float64}(), package_name="", package_uri="", project_uri=nothing, env_content_hash=nothing, n_runs=1, gc_between_testitems=nothing, memory_threshold=nothing, shutdown_timeout=60, color::Bool=false)
         events = NamedTuple[]
         events_lock = ReentrantLock()
         push_event!(e) = lock(events_lock) do
@@ -410,7 +420,7 @@
         end
 
         controller = TestItemController(callbacks; log_level=log_level)
-        test_env = make_test_environment(; mode=mode, julia_cmd=julia_cmd, julia_args=julia_args, env=env, package_name=package_name, package_uri=package_uri, project_uri=project_uri, env_content_hash=env_content_hash)
+        test_env = make_test_environment(; mode=mode, julia_cmd=julia_cmd, julia_args=julia_args, env=env, package_name=package_name, package_uri=package_uri, project_uri=project_uri, env_content_hash=env_content_hash, color=color)
 
         # Build work units from items
         work_units = [TestRunItem(item.id, test_env.id, get(item_timeouts, item.id, nothing), log_level) for item in items]
@@ -501,7 +511,7 @@
             rethrow()
         end
 
-        return (events=events, process_events=process_events, coverage=coverage_result, outputs=outputs, runs=runs)
+        return (events=events, process_events=process_events, coverage=coverage_result, outputs=outputs, process_output=process_output, runs=runs)
     end
 
     import UUIDs

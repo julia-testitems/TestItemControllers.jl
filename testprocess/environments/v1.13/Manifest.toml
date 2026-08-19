@@ -1,6 +1,6 @@
 # This file is machine-generated - editing it directly is not advised
 
-julia_version = "1.13.0-rc2"
+julia_version = "1.13.0-rc3"
 manifest_format = "2.1"
 project_hash = "91fb23b2b0d5c86a933cd680d96afbcae222bb69"
 
@@ -98,7 +98,7 @@ version = "1.11.0"
 
 [[deps.MozillaCACerts_jll]]
 uuid = "14a3606d-f60d-562e-9121-12d972cd8159"
-version = "2025.12.2"
+version = "2026.7.16"
 
 [[deps.NetworkOptions]]
 uuid = "ca575930-c2e3-43a9-ace4-1e988b2c1908"
@@ -126,6 +126,11 @@ weakdeps = ["REPL"]
 [[deps.Printf]]
 deps = ["Unicode"]
 uuid = "de0858da-6303-5e67-8744-51eddeeeb8d7"
+version = "1.11.0"
+
+[[deps.Profile]]
+deps = ["StyledStrings"]
+uuid = "9abbd945-dff8-562f-b5e8-e1ebf5ef1b79"
 version = "1.11.0"
 
 [[deps.REPL]]
@@ -170,7 +175,7 @@ uuid = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
 version = "1.11.0"
 
 [[deps.TestItemServer]]
-deps = ["Base64", "CRC32c", "Dates", "Distributed", "FileWatching", "InteractiveUtils", "LibGit2", "Logging", "Mmap", "Pkg", "REPL", "Random", "Sockets", "TOML", "Test", "UUIDs", "Unicode"]
+deps = ["Base64", "CRC32c", "Dates", "Distributed", "FileWatching", "InteractiveUtils", "LibGit2", "Logging", "Mmap", "Pkg", "Profile", "REPL", "Random", "Sockets", "TOML", "Test", "UUIDs", "Unicode"]
 path = "../../TestItemServer"
 uuid = "1076c532-7f93-4758-ac65-93afa8eae143"
 version = "1.0.0"
