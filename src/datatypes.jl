@@ -23,6 +23,7 @@ Describes a Julia process configuration for running test items.
 - `project_uri::Union{Nothing,String}` — file URI of a custom project (or `nothing` for the package default).
 - `env_content_hash::Union{Nothing,String}` — opaque hash of the environment content, used to decide whether a pooled process can be reused without a restart.
 - `check_bounds::Union{Nothing,String}` — value for the test process's `--check-bounds` flag: `"auto"` (or `nothing`, the default) respects `@inbounds` annotations and lets the test process reuse the precompile caches of normal dev sessions; `"yes"` forces bounds checks everywhere (the `Pkg.test` behavior) at the cost of precompiling the whole environment into a separate cache slot on the first run.
+- `color::Bool` — run the test process with `--color=yes`, so that its output carries ANSI escapes. Off by default. The escapes are passed through on both streams — per-item output (`on_append_output`) and process-level output (`on_process_output`) alike — and it is up to the client to render or strip them for whatever view each one goes to.
 """
 struct TestEnvironment
     id::String
@@ -36,13 +37,15 @@ struct TestEnvironment
     project_uri::Union{Nothing,String}
     env_content_hash::Union{Nothing,String}
     check_bounds::Union{Nothing,String}
+    color::Bool
 
     function TestEnvironment(id, julia_cmd, julia_args, julia_num_threads, julia_env, mode,
-            package_name, package_uri, project_uri, env_content_hash, check_bounds=nothing)
+            package_name, package_uri, project_uri, env_content_hash, check_bounds=nothing,
+            color::Bool=false)
         check_bounds in (nothing, "yes", "auto") ||
             throw(ArgumentError("check_bounds must be \"yes\" or \"auto\", got $(repr(check_bounds))"))
         return new(id, julia_cmd, julia_args, julia_num_threads, julia_env, mode,
-            package_name, package_uri, project_uri, env_content_hash, check_bounds)
+            package_name, package_uri, project_uri, env_content_hash, check_bounds, color)
     end
 end
 

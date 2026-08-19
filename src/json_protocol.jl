@@ -16,6 +16,10 @@ using ..JSONRPC: @dict_readable, RequestType, NotificationType, Outbound
     projectUri::Union{Missing,String}
     envContentHash::Union{Missing,String}
     checkBounds::Union{Missing,String}
+    # Start the test process with `--color=yes`, so that its output carries ANSI escapes.
+    # Both `appendOutput` and `testProcessOutput` then carry them; what to do with them is
+    # the client's call.
+    color::Union{Missing,Bool}
 end
 
 @dict_readable struct TestRunItem <: JSONRPC.Outbound

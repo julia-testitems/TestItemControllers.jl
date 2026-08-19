@@ -196,6 +196,10 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
                 push!(jlArgs, "--check-bounds=$(env.check_bounds)")
             end
 
+            # Without this the test process would see a pipe rather than a terminal and
+            # turn color off, so nothing a test item prints could ever carry it.
+            env.color && push!(jlArgs, "--color=yes")
+
             # Reserve the watchdog's interactive thread where the Julia version supports it,
             # otherwise keep the pre-existing behaviour exactly (the watchdog then degrades
             # to "no diagnostic dump", which `start_watchdog!` handles).

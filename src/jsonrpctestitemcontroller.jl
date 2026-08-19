@@ -214,6 +214,7 @@ function create_testrun_request(params::TestItemControllerProtocol.CreateTestRun
             coalesce(e.projectUri, nothing),
             coalesce(e.envContentHash, nothing),
             coalesce(e.checkBounds, nothing),
+            coalesce(e.color, false),
         )
         for e in params.testEnvironments
     ]
