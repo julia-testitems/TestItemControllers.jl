@@ -432,8 +432,10 @@
 
             testrun_id = string(UUIDs.uuid4())
 
+            run_coverage = nothing
+
             testrun_task = @async try
-                coverage_result = execute_testrun(
+                run_coverage = execute_testrun(
                     controller,
                     testrun_id,
                     [test_env],
@@ -480,7 +482,11 @@
             run_outputs = lock(outputs_lock) do
                 Dict(k => v[length(get(outputs_before, k, ""))+1:end] for (k, v) in outputs)
             end
-            push!(runs, (testrun_id=testrun_id, events=run_events, outputs=run_outputs))
+            # Per-run coverage, not just the last run's: tests that check whether a pooled
+            # process reports the same coverage twice need both runs' data.
+            coverage_result = run_coverage
+
+            push!(runs, (testrun_id=testrun_id, events=run_events, outputs=run_outputs, coverage=run_coverage))
         end
 
         # Bounded, unlike a bare `wait`: a controller that wedges in shutdown used to hang
