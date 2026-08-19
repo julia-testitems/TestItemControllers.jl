@@ -366,7 +366,7 @@
     # the second run gets the pooled, already-warm test process of the first. `runs` in the
     # returned value holds the per-run events and output; `events`/`outputs` are the union
     # across runs, which is what a single-run caller wants.
-    function run_testrun(items, setups; mode="Run", max_procs=1, timeout=600, coverage_root_uris=nothing, log_level=:Debug, julia_cmd=joinpath(Sys.BINDIR, "julia"), julia_args=String[], env=Dict{String,Union{String,Nothing}}(), item_timeouts=Dict{String,Float64}(), package_name="", package_uri="", project_uri=nothing, env_content_hash=nothing, n_runs=1, gc_between_testitems=nothing, memory_threshold=nothing, shutdown_timeout=60, color::Bool=false)
+    function run_testrun(items, setups; mode="Run", max_procs=1, timeout=600, coverage_root_uris=nothing, log_level=:Debug, julia_cmd=joinpath(Sys.BINDIR, "julia"), julia_args=String[], env=Dict{String,Union{String,Nothing}}(), item_timeouts=Dict{String,Float64}(), package_name="", package_uri="", project_uri=nothing, env_content_hash=nothing, n_runs=1, gc_between_testitems=nothing, memory_threshold=nothing, shutdown_timeout=60, color::Bool=false, activation_progress_seconds=nothing)
         events = NamedTuple[]
         events_lock = ReentrantLock()
         push_event!(e) = lock(events_lock) do
@@ -419,7 +419,9 @@
             end
         end
 
-        controller = TestItemController(callbacks; log_level=log_level)
+        controller = activation_progress_seconds === nothing ?
+            TestItemController(callbacks; log_level=log_level) :
+            TestItemController(callbacks; log_level=log_level, activation_progress_seconds=activation_progress_seconds)
         test_env = make_test_environment(; mode=mode, julia_cmd=julia_cmd, julia_args=julia_args, env=env, package_name=package_name, package_uri=package_uri, project_uri=project_uri, env_content_hash=env_content_hash, color=color)
 
         # Build work units from items

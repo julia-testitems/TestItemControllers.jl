@@ -223,3 +223,51 @@ end
     @test isempty(controller.test_processes)
     @test controller.shutdown_timer === nothing
 end
+
+@testitem "A slow environment activation is reported while it is still running" setup=[TestHelpers] begin
+    # Activation covers the test process's own precompilation, so it can legitimately take
+    # minutes. Until it answers, the controller has nothing to say beyond the "Activating"
+    # status it posted at the start — which is how a per-version platform item that stalled
+    # in activation on macOS produced a job log naming neither the stage nor the process.
+    #
+    # The interval is dialled down to a fraction of a second so a *normal* activation, which
+    # spends well over that launching and loading the test server, trips it.
+    using Logging: with_logger, Warn
+    using Test: TestLogger
+
+    discovered = TestHelpers.basic_package_discovery()
+    items = filter(i -> i.label == "add works", discovered.items)
+    @test length(items) == 1
+
+    logger = TestLogger(min_level=Warn)
+    result = with_logger(logger) do
+        TestHelpers.run_testrun(items, discovered.setups, discovered; activation_progress_seconds=0.05)
+    end
+
+    @test length(filter(e -> e.event == :passed, result.events)) == 1
+
+    pending = filter(r -> r.message == "Environment activation still pending", logger.logs)
+    @test !isempty(pending)
+    # It names what is slow, not just that something is.
+    @test haskey(first(pending).kwargs, :testprocess_id)
+    @test first(pending).kwargs[:elapsed_seconds] > 0
+end
+
+@testitem "activation_progress_seconds must be positive" setup=[TestHelpers] begin
+    import TestItemControllers
+    using TestItemControllers: TestItemController, ControllerCallbacks
+
+    callbacks = ControllerCallbacks(
+        on_testitem_started = (run_id, item_id, test_env_id) -> nothing,
+        on_testitem_passed = (run_id, item_id, test_env_id, duration) -> nothing,
+        on_testitem_failed = (run_id, item_id, test_env_id, messages, duration) -> nothing,
+        on_testitem_errored = (run_id, item_id, test_env_id, messages, duration) -> nothing,
+        on_testitem_skipped = (run_id, item_id, test_env_id) -> nothing,
+        on_append_output = (run_id, item_id, test_env_id, output) -> nothing,
+        on_attach_debugger = (run_id, pipe_name) -> nothing,
+    )
+
+    @test_throws ArgumentError TestItemController(callbacks; activation_progress_seconds=0)
+    @test TestItemController(callbacks).activation_progress_seconds ==
+        TestItemControllers.DEFAULT_ACTIVATION_PROGRESS_SECONDS
+end
