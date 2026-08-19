@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- An environment activation that has not finished is now reported with a warning naming the test process and how long it has been waiting, repeating every `activation_progress_seconds` (a new `TestItemController` keyword, default 120). Activation covers the test process's own precompilation, so a slow one is legitimate and is not interrupted — but a run that stalls there no longer goes silent between the `Activating` status and whatever eventually gives up.
 - The JSON-RPC protocol gained a client → controller `shutdown` notification for a graceful shutdown: every run is cancelled, every test process is terminated (force-killed if it does not exit within the grace period) and the controller exits once they are gone.
 - `write_junit_xml(io_or_path, ::TestrunResult; root)` writes a test run as JUnit XML, the one report format every CI system ingests. Test items are grouped into one `<testsuite>` per source file and one `<testcase>` per (item × run profile); captured output goes to `<system-out>` with ANSI escape sequences stripped, and performance statistics become `<properties>`. It is a pure function of a `TestrunResult`, so a result file written by one process can be converted by another.
 - `write_lcov(io_or_path, ::TestrunResult)` writes a run's merged coverage in LCOV info format, so consumers no longer have to reach into the vendored `CoverageTools`.

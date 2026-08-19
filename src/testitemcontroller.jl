@@ -2,6 +2,12 @@
 # few hundred milliseconds. This is the backstop for the case where one never does.
 const DEFAULT_SHUTDOWN_GRACE_SECONDS = 30.0
 
+# Activating an environment normally takes seconds. When it takes minutes it is because the
+# test process is precompiling, or fetching, or wedged — and until it answers, the controller
+# has nothing to say beyond the "Activating" status it posted at the start. This is how often
+# it says so anyway.
+const DEFAULT_ACTIVATION_PROGRESS_SECONDS = 120.0
+
 """
     TestItemController(callbacks; error_handler_file=nothing, crash_reporting_pipename=nothing, log_level=:Info)
 
@@ -27,6 +33,10 @@ the reactor event loop, then use [`execute_testrun`](@ref) to submit work.
   to report its termination before force-killing whatever is left and stopping anyway
   (default 30). Shutdown normally completes well within a second; this only bounds the
   failure case.
+- `activation_progress_seconds::Real` — how often a still-unfinished environment activation
+  is reported with a warning (default 120). Activation covers the test process's own
+  precompilation, so a slow one is normal and is not interrupted; this only makes it visible
+  while it is happening instead of only in the post-mortem of whatever kills the run.
 
 # Lifecycle
 
@@ -72,6 +82,10 @@ mutable struct TestItemController{CB<:ControllerCallbacks}
     shutdown_grace_seconds::Float64
     shutdown_timer::Union{Nothing,Timer}
 
+    # How often `_activate_env!` warns that an activation it is still waiting on has not
+    # finished.
+    activation_progress_seconds::Float64
+
     # Scheduling history, in memory and keyed by the (stable) test item id. It survives
     # across the test runs of one session; nothing is persisted to disk.
     schedule::Symbol
@@ -85,12 +99,15 @@ mutable struct TestItemController{CB<:ControllerCallbacks}
         crash_reporting_pipename=nothing,
         log_level::Symbol=:Info,
         schedule::Symbol=:duration,
-        shutdown_grace_seconds::Real=DEFAULT_SHUTDOWN_GRACE_SECONDS) where {CB<:ControllerCallbacks}
+        shutdown_grace_seconds::Real=DEFAULT_SHUTDOWN_GRACE_SECONDS,
+        activation_progress_seconds::Real=DEFAULT_ACTIVATION_PROGRESS_SECONDS) where {CB<:ControllerCallbacks}
 
         schedule in (:duration, :contiguous) ||
             throw(ArgumentError("schedule must be :duration or :contiguous, got $(repr(schedule))"))
         shutdown_grace_seconds > 0 ||
             throw(ArgumentError("shutdown_grace_seconds must be positive, got $(shutdown_grace_seconds)"))
+        activation_progress_seconds > 0 ||
+            throw(ArgumentError("activation_progress_seconds must be positive, got $(activation_progress_seconds)"))
 
         return new{CB}(
             callbacks,
@@ -107,6 +124,7 @@ mutable struct TestItemController{CB<:ControllerCallbacks}
             controller_fsm("controller"),
             Float64(shutdown_grace_seconds),
             nothing,
+            Float64(activation_progress_seconds),
             schedule,
             Dict{String,Symbol}(),
             Dict{String,Float64}(),
@@ -2281,15 +2299,29 @@ function _activate_env!(c::TestItemController, ps::TestProcessState)
             @debug "Activation cancelled: endpoint gone before send" testprocess_id=ps.id
             return
         end
-        result = JSONRPC.send(
-            ps.endpoint,
-            TestItemServerProtocol.testserver_activate_env_request_type,
-            TestItemServerProtocol.ActivateEnvParams(
-                projectUri = something(ps.env.project_uri, missing),
-                packageUri = ps.env.package_uri,
-                packageName = ps.env.package_name
+        # Say so, repeatedly, while this is outstanding. The request covers the test
+        # process's own precompilation, so a slow one is legitimate and is not interrupted
+        # here — but without this the controller goes silent between the "Activating" status
+        # and whatever eventually gives up, and a run that stalls in activation leaves a log
+        # that names neither the stage nor the process.
+        interval = c.activation_progress_seconds
+        started = time()
+        progress_timer = Timer(interval, interval=interval) do _
+            @warn "Environment activation still pending" testprocess_id=ps.id package=ps.env.package_name elapsed_seconds=round(time() - started, digits=1)
+        end
+        result = try
+            JSONRPC.send(
+                ps.endpoint,
+                TestItemServerProtocol.testserver_activate_env_request_type,
+                TestItemServerProtocol.ActivateEnvParams(
+                    projectUri = something(ps.env.project_uri, missing),
+                    packageUri = ps.env.package_uri,
+                    packageName = ps.env.package_name
+                )
             )
-        )
+        finally
+            close(progress_timer)
+        end
 
         if result.status == "failed"
             @warn "Environment activation failed" testprocess_id=ps.id error=coalesce(result.error, "unknown error")
