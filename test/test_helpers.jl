@@ -482,8 +482,8 @@
             run_outputs = lock(outputs_lock) do
                 Dict(k => v[length(get(outputs_before, k, ""))+1:end] for (k, v) in outputs)
             end
-            # Per-run coverage, not just the last run's: tests that check whether a pooled
-            # process reports the same coverage twice need both runs' data.
+            # Per-run coverage, not just the last run's: a test that checks whether repeated
+            # runs report the same coverage needs every run's data.
             coverage_result = run_coverage
 
             push!(runs, (testrun_id=testrun_id, events=run_events, outputs=run_outputs, coverage=run_coverage))

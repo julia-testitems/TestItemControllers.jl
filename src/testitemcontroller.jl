@@ -421,6 +421,20 @@ function handle!(c::TestItemController, msg::ReturnToPoolMsg)
         return false
     end
 
+    # Coverage results must not depend on how warm the process is. On a reused process the
+    # compiler already holds inference results for the code under test, so pure calls with
+    # constant arguments are folded away instead of executed and their line counters never
+    # move again: julia-vscode#3707 reported the same unchanged test item at 100% on the
+    # first run and 27.27% on every later run against the same process. A coverage process
+    # is therefore retired at the end of its test run instead of being pooled, which is also
+    # what `Pkg.test(coverage=true)` effectively does.
+    if ps.env.mode == "Coverage"
+        @info "Test process '$(msg.testprocess_id)' finished its coverage test run, terminating it instead of pooling"
+        _clear_testrun_on_process!(ps)
+        _shutdown_test_process!(c, ps)
+        return false
+    end
+
     @info "Test process '$(msg.testprocess_id)' finished its test run, returning to pool"
     _clear_testrun_on_process!(ps)
 
