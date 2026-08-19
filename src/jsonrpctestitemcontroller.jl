@@ -307,6 +307,11 @@ function Base.run(jr_controller::JSONRPCTestItemController)
                 dispatch_msg(jr_controller.endpoint, msg, jr_controller)
             catch err
                 bt = catch_backtrace()
+                # Reported and fatal on purpose: nothing above this frame can act on a request
+                # that failed to dispatch, and the caller is left waiting for a response that
+                # will never come. Under the crash-reporting logger installed by
+                # `testitemcontroller_main.jl` this is what turns such a bug into a report
+                # instead of a silent hang.
                 @error "Error dispatching message" exception=(err, bt)
             end
         end
