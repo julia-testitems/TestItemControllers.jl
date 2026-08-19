@@ -60,13 +60,25 @@ function _init_watchdog_globals!()
 end
 
 # `Profile` is a stdlib, but the test process runs in a pinned environment
-# (`testprocess/environments/v*`) whose manifest does not list it, so `import Profile` in
-# this package would not resolve. Loading it by name against the load path stack does —
-# `@stdlib` is still on it at startup, before any test environment is activated. If that
-# ever stops being true we degrade to a text-only dump instead of failing.
+# (`testprocess/environments/v*`) whose manifest does not list it, so `import Profile` in this
+# package would not resolve. It is therefore loaded at runtime — and by UUID, not by name.
+#
+# By name (`Base.require(Main, :Profile)`) the lookup goes through the load path, which only
+# reaches a stdlib while `@stdlib` is on it. That held for the case this was written for — VS
+# Code launching the process, watchdog started before any test environment is activated — but
+# not for a controller embedded in something that pins `JULIA_LOAD_PATH`, which `Pkg.test` does:
+# the test process inherited a load path of the test environment alone, the lookup raised
+# "Package Profile not found in current path", and every hang dump quietly degraded to
+# "No CPU profile: the Profile stdlib is not loadable in this test process." A stdlib is
+# locatable by its UUID whatever the load path says, which is what we want — this is
+# diagnostics, not a dependency of the environment under test.
+#
+# If it ever genuinely cannot be loaded we still degrade to a text-only dump instead of failing.
+const PROFILE_PKGID = Base.PkgId(Base.UUID("9abbd945-dff8-562f-b5e8-e1ebf5ef1b79"), "Profile")
+
 function _load_profile_module()
     return try
-        Base.require(Main, :Profile)
+        Base.require(PROFILE_PKGID)
     catch err
         @debug "Profile is not loadable in this test process; hang diagnostics will be text only" exception=err
         nothing
