@@ -99,6 +99,18 @@
         end
     end
 
+    # This is dominated by juliaup fetching an old toolchain and that Julia precompiling into
+    # a fresh depot, which is unbounded on a slow runner — the 32-bit Windows leg times out at
+    # 600s. The deadline is here to catch a hang, not to hold the toolchain to a performance
+    # budget.
+    #
+    # It must stay *below* the per-item deadline the runner executing this suite imposes,
+    # which .github/workflows/juliaci.yml sets to 2400s. Above it, the runner kills the item
+    # first and `run_testrun`'s dump of what every nested test process was doing — the whole
+    # point of having a guard here — never runs. That inversion is how a stalled `Julia 1.10
+    # platform` item on macOS once reported nothing but a bare timeout.
+    const PLATFORM_RUN_TIMEOUT = 1800
+
     """
         check_julia_version(version)
 
@@ -123,11 +135,7 @@
             items, discovered.setups, discovered;
             julia_cmd="julia",
             julia_args=["+$version"],
-            # This is dominated by juliaup fetching an old toolchain and that Julia
-            # precompiling into a fresh depot, which is unbounded on a slow runner — the
-            # 32-bit Windows leg times out at 600s. The deadline is here to catch a hang,
-            # not to hold the toolchain to a performance budget.
-            timeout=1800,
+            timeout=PLATFORM_RUN_TIMEOUT,
             env=isolated_depot_env(version)
         )
 
