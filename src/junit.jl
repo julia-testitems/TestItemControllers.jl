@@ -62,19 +62,21 @@ end
 _clean(s::AbstractString) = _xml_escape(_strip_ansi(s))
 
 """
-    _relative_path(uri, root)
+    _report_path(uri, root)::Union{Nothing,String}
 
 The file path of `uri` relative to `root`, with `/` separators so a Windows run and a
-Linux run of the same suite produce the same `classname`. Falls back to the URI itself
-when the path cannot be relativized (a non-`file:` URI, or a different Windows drive).
+Linux run of the same suite produce the same path. Returns `nothing` when `uri` is not a
+`file:` URI, leaving it to the caller to decide what an unusable entry becomes.
+
+Shared with the LCOV writer, which needs the same relativization for its `SF:` lines.
 """
-function _relative_path(uri::AbstractString, root::Union{Nothing,AbstractString})
+function _report_path(uri::AbstractString, root::Union{Nothing,AbstractString})
     path = try
         uri2filepath(uri)
     catch
         nothing
     end
-    path === nothing && return uri
+    path === nothing && return nothing
 
     if root !== nothing
         root_path = startswith(root, "file:") ? something(uri2filepath(root), root) : root
@@ -100,6 +102,15 @@ function _relative_path(uri::AbstractString, root::Union{Nothing,AbstractString}
 
     return replace(path, '\\' => '/')
 end
+
+"""
+    _relative_path(uri, root)
+
+As [`_report_path`](@ref), but falling back to the URI itself when the path cannot be
+derived — a `classname` has to say *something*.
+"""
+_relative_path(uri::AbstractString, root::Union{Nothing,AbstractString}) =
+    something(_report_path(uri, root), String(uri))
 
 # The discovery id, as recorded by whoever produced the result.
 #

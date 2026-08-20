@@ -287,3 +287,96 @@ end
         @test !occursin(replace(pkg, "\\" => "/"), xml)
     end
 end
+
+@testitem "LCOV export relativizes against a root" begin
+    using TestItemControllers: write_lcov, filepath2uri
+    using TestItemControllers.Results
+
+    # Coverage services match `SF:` paths against paths in the repository. The absolute
+    # paths of a CI runner match nothing at all, which is one way a fully covered package
+    # gets reported as 0%.
+    mktempdir() do dir
+        dir = realpath(dir)
+        pkg = joinpath(dir, "pkg")
+        mkpath(joinpath(pkg, "src"))
+        uri = string(filepath2uri(joinpath(pkg, "src", "f.jl")))
+
+        result = TestrunResult(
+            TestrunResultDefinitionError[],
+            TestrunResultTestitem[],
+            Dict{String,String}(),
+            [TestrunResultFileCoverage(uri, Union{Nothing,Int}[nothing, 3, 0])],
+        )
+
+        io = IOBuffer()
+        @test write_lcov(io, result; root=pkg) == true
+        lcov = String(take!(io))
+
+        @test occursin("SF:src/f.jl", lcov)
+        @test !occursin(replace(pkg, "\\" => "/"), lcov)
+
+        # ...and a relative root is resolved against the working directory, which `relpath`
+        # does not do on its own.
+        io = IOBuffer()
+        cd(dir) do
+            write_lcov(io, result; root="pkg")
+        end
+        @test occursin("SF:src/f.jl", String(take!(io)))
+    end
+end
+
+@testitem "LCOV export keeps files outside the root absolute" begin
+    using TestItemControllers: write_lcov, filepath2uri
+    using TestItemControllers.Results
+
+    # A `..`-heavy path means nothing to a coverage service, and dropping the record would
+    # make a stray file look like a coverage regression rather than a stray file.
+    mktempdir() do dir
+        dir = realpath(dir)
+        mkpath(joinpath(dir, "pkg"))
+        mkpath(joinpath(dir, "elsewhere"))
+        uri = string(filepath2uri(joinpath(dir, "elsewhere", "f.jl")))
+
+        result = TestrunResult(
+            TestrunResultDefinitionError[],
+            TestrunResultTestitem[],
+            Dict{String,String}(),
+            [TestrunResultFileCoverage(uri, Union{Nothing,Int}[1])],
+        )
+
+        io = IOBuffer()
+        @test write_lcov(io, result; root=joinpath(dir, "pkg")) == true
+        lcov = String(take!(io))
+
+        @test !occursin("SF:..", lcov)
+        # Lowercased because `filepath2uri` lowercases the Windows drive letter on the way
+        # in, and the round trip does not restore its case.
+        @test occursin(lowercase(replace(joinpath(dir, "elsewhere", "f.jl"), "\\" => "/")),
+            lowercase(lcov))
+    end
+end
+
+@testitem "LCOV export uses forward slashes and skips non-file URIs" begin
+    using TestItemControllers: write_lcov
+    using TestItemControllers.Results
+
+    # `uri2filepath` hands back a backslashed path on Windows, which no LCOV consumer
+    # recognizes — a Windows leg used to contribute nothing to a merged report.
+    result = TestrunResult(
+        TestrunResultDefinitionError[],
+        TestrunResultTestitem[],
+        Dict{String,String}(),
+        [
+            TestrunResultFileCoverage("untitled:Untitled-1", Union{Nothing,Int}[1]),
+            TestrunResultFileCoverage("file:///c%3A/pkg/src/f.jl", Union{Nothing,Int}[nothing, 3]),
+        ],
+    )
+
+    io = IOBuffer()
+    @test write_lcov(io, result) == true
+    lcov = String(take!(io))
+
+    @test !occursin("\\", lcov)
+    @test !occursin("Untitled-1", lcov)
+    @test occursin("SF:c:/pkg/src/f.jl", lcov)
+end
