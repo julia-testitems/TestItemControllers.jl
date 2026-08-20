@@ -190,6 +190,37 @@ end
     end
 end
 
+@testitem "Coverage roots match whole path segments" setup=[TestHelpers] begin
+    if VERSION < v"1.11"
+        @test_skip "Coverage mode requires Julia 1.11+"
+    else
+        using TestItemControllers: filepath2uri
+
+        pkg_path = joinpath(TestHelpers.TESTDATA_DIR, "BasicPackage")
+        discovered = TestHelpers.discover_test_items(pkg_path)
+
+        passing_items = filter(i -> i.label == "add works", discovered.items)
+        @test length(passing_items) == 1
+
+        # A root is a folder URI with no trailing slash, so a plain prefix test also
+        # accepted anything whose name merely started with it: this truncated root used to
+        # collect the whole of `src`, the same way a root of `<workspace>/Foo` collected
+        # `<workspace>/Foo2`.
+        truncated_root = String(chop(filepath2uri(joinpath(pkg_path, "src"))))
+
+        result = TestHelpers.run_testrun(
+            passing_items, discovered.setups, discovered;
+            mode="Coverage",
+            coverage_root_uris=[truncated_root],
+            timeout=600
+        )
+
+        passed_events = filter(e -> e.event == :passed, result.events)
+        @test length(passed_events) == 1
+        @test result.coverage === nothing
+    end
+end
+
 @testitem "Coverage is identical across repeated runs" setup=[TestHelpers] begin
     if VERSION < v"1.11"
         @test_skip "Coverage mode requires Julia 1.11+"

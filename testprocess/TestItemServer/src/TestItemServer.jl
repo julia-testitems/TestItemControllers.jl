@@ -309,14 +309,21 @@ function collect_coverage_data!(coverage_results, roots)
             rm(lcov_filename)
         end
 
-        # `roots === nothing` means the run put no restriction on which files to report —
-        # the CLI never sends `coverageRootUris`. Feeding that to `any` throws a
-        # `MethodError`, which the caller's `catch` turns into a spurious "errored" result
-        # for whatever test item happened to be running, so the restriction has to be
-        # skipped explicitly rather than left to short-circuit on an empty result.
+        # `roots === nothing` means the run put no restriction on which files to report,
+        # which is what a client that sends no `coverageRootUris` gets. Feeding that to
+        # `any` throws a `MethodError`, which the caller's `catch` turns into a spurious
+        # "errored" result for whatever test item happened to be running, so the
+        # restriction has to be skipped explicitly rather than left to short-circuit on an
+        # empty result.
         filter!(cov_info) do i
             isabspath(i.filename) || return false
-            roots !== nothing && !any(j -> startswith(filepath2uri(i.filename), j), roots) && return false
+            if roots !== nothing
+                uri = filepath2uri(i.filename)
+                # A root is a folder URI and `filepath2uri` never leaves a trailing slash,
+                # so a bare prefix test also accepts a sibling whose name merely starts
+                # with it — a root of `<workspace>/Foo` collecting `<workspace>/Foo2`.
+                any(j -> startswith(uri, endswith(j, "/") ? j : j * "/"), roots) || return false
+            end
             return isfile(i.filename)
         end
 
