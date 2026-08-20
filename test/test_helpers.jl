@@ -47,6 +47,13 @@
     An environment overlay that points a test process at a *private, writable* depot layered
     on top of that Julia's own default depots.
 
+    The private depot lives in a stable directory under the system temp dir, never in the
+    user's own depot: these are test artifacts, and `~/.julia` is not ours to leave things in.
+    Stable rather than an `mktempdir()` because the precompile caches it accumulates are worth
+    keeping between runs — a fresh depot per run means recompiling `BasicPackage`'s
+    dependencies from scratch under every Julia version the platform items cover. Point
+    `TIC_TEST_DEPOT_ROOT` somewhere else to override the location.
+
     Per-version test items run concurrently, and every worker run reaches Pkg (`Pkg.develop`
     on Julia <= 1.10, `Pkg.instantiate` inside TestEnv), which rewrites depot-wide usage logs
     such as `logs/manifest_usage.toml` without locking on older Pkg versions. Making the
@@ -64,7 +71,7 @@
     function isolated_depot_env(version::AbstractString)
         lock(_HELPER_LOCK) do
             get!(_DEPOT_ENVS, version) do
-                root = get(ENV, "TIC_TEST_DEPOT_ROOT", joinpath(homedir(), ".julia", "tic-test-depots"))
+                root = get(ENV, "TIC_TEST_DEPOT_ROOT", joinpath(tempdir(), "TestItemControllers-test-depots"))
                 private = joinpath(root, "v$(version)")
                 mkpath(private)
 
