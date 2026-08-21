@@ -12,8 +12,6 @@ jobs:
     with:
       include-all-compatible-minor-versions: true
       include-rc-versions: true
-      include-beta-versions: true
-      filter: 'dirname(filename) == joinpath(pwd(), "test")'
       github_job_prep_script: 'scripts/install_julia_versions.jl'
       # Above the 1800s budget that TestHelpers.check_julia_version gives its nested run
       # (plus its 60s shutdown wait), so that a stalled per-version item is caught by that
