@@ -13,15 +13,13 @@ end
 # rather than by what else lives in the depot, so on Linux and macOS a `General.tar.zst`
 # lands here and `check_julia_version("1.7")` fails on it, while the same test passes on
 # Windows. An unpacked registry is a plain folder that every version reads.
-#
-# Only where the problem exists, though: on Windows the registry is already gzip, and an
-# unpacked one there makes Pkg's replace-on-write dance leave `*.pid.deleted` entries that
-# the concurrent test processes then trip over with `stat: permission denied`.
-if !Sys.iswindows()
-    registries = joinpath(first(DEPOT_PATH), "registries")
-    packed = isdir(registries) && any(i -> startswith(i, "General.tar"), readdir(registries))
+registries = joinpath(first(DEPOT_PATH), "registries")
+entries = isdir(registries) ? readdir(registries) : String[]
+packed = any(i -> startswith(i, "General.tar"), entries)
+unpacked = isdir(joinpath(registries, "General"))
 
-    if packed || !isdir(joinpath(registries, "General"))
+if !Sys.iswindows()
+    if packed || !unpacked
         println("Installing the General registry unpacked, so that Julia 1.7 can read it...")
 
         # Removing the packed registry has to happen outside the `withenv` below: with
@@ -43,6 +41,26 @@ if !Sys.iswindows()
     if github_env !== nothing
         open(github_env, "a") do io
             println(io, "JULIA_PKG_UNPACK_REGISTRY=true")
+        end
+    end
+elseif unpacked && !packed
+    # Windows never had the zstd problem — Pkg refuses zstd for registries there, for the
+    # same 7z reason — and an unpacked registry actively hurts: Pkg replaces it on the next
+    # registry operation, and its replace-on-write leaves `$XXXX.pid.deleted` entries that
+    # the concurrent test processes then trip over with `stat: permission denied`. The
+    # depot is cached between runs, so one unpacked registry would keep breaking every
+    # later Windows run. Put a packed one back, and sweep up what was left behind.
+    println("Restoring a packed General registry, which is what Windows wants...")
+
+    Pkg.Registry.rm("General")
+    Pkg.Registry.add("General")
+
+    for i in readdir(registries)
+        endswith(i, ".pid.deleted") || continue
+        try
+            rm(joinpath(registries, i); recursive=true, force=true)
+        catch err
+            @warn "Could not remove a leftover registry entry" entry = i err
         end
     end
 end
