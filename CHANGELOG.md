@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [2.0.0] - Unreleased
 
+### Fixed
+
+- `Logging` is now declared in the test target. `test/test_worker_lifecycle.jl` does `using Logging`, so `Pkg.test()` always ended in `ArgumentError: Package Logging not found in current path` — meaning the test item covering the slow-activation warning had never actually run.
+
 ### Added
 
 - A test item timeout is now logged with the evidence for *which* channel failed: how long it has been since the test process last sent a JSON-RPC message, how long since it last produced output, whether the process's own hang watchdog left a diagnostics dump, and — on a JSONRPC that can report it — how far behind the connection's outbound queue is. A test process talks to the controller over two independent channels, and a timeout only ever proves that the *result* never arrived. Output still arriving while the socket has gone quiet means the connection died, not the test; before this the two were indistinguishable without reconstructing the run from its artifacts afterwards.
