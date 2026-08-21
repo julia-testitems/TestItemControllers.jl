@@ -29,3 +29,15 @@ if packed || !isdir(joinpath(registries, "General"))
         Pkg.Registry.add("General")
     end
 end
+
+# Converting what is here now is not enough: anything later in this job that installs or
+# refreshes the registry — the run itself, or a test process resolving an environment —
+# would put a packed one back. Setting the variable for the rest of the job keeps every
+# such download unpacked too.
+github_env = get(ENV, "GITHUB_ENV", nothing)
+
+if github_env !== nothing
+    open(github_env, "a") do io
+        println(io, "JULIA_PKG_UNPACK_REGISTRY=true")
+    end
+end
