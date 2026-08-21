@@ -42,6 +42,14 @@ mutable struct TestProcessState
     # Exit info captured when the OS process dies (set in _launch_julia_process! catch)
     last_exit_code::Union{Nothing,Int}
     last_term_signal::Union{Nothing,Int}
+    # Last time anything was heard from this process, on each of its two independent
+    # channels: the JSON-RPC socket that carries every result, and the stdout/stderr pipes
+    # that carry captured output. Diagnostics only — nothing branches on these. They exist
+    # because the two can diverge: a process whose socket has gone silent while its output
+    # still flows is a broken connection, not a hung test, and without both timestamps that
+    # distinction is invisible in the log.
+    last_message_at::Union{Nothing,Float64}
+    last_output_at::Union{Nothing,Float64}
 end
 
 function TestProcessState(id::String, env::ProcessEnv;
@@ -76,6 +84,8 @@ function TestProcessState(id::String, env::ProcessEnv;
         Dict{Tuple{String,String},@NamedTuple{output::String, duration::Union{Nothing,Float64}}}(),  # loaded_setups
         nothing,                                        # last_exit_code
         nothing,                                        # last_term_signal
+        nothing,                                        # last_message_at
+        nothing,                                        # last_output_at
     )
 end
 

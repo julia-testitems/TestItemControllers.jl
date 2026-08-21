@@ -268,6 +268,7 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
                     current_output_testitem_id = nothing
                     while !eof(pipe_out)
                         data = readavailable(pipe_out, token)
+                        ps.last_output_at = time()
                         data_as_string = String(data)
 
                         # Capture raw output for crash diagnostics
@@ -444,6 +445,10 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
                                     end
                                 end
                                 @debug "Dispatching message from test server" testprocess_id method=msg.method
+
+                                # Stamped here rather than in the dispatcher so it covers
+                                # every method, including ones with no handler.
+                                ps.last_message_at = time()
 
                                 dispatch_testprocess_msg(endpoint, msg, (reactor_channel, ps))
                             end
