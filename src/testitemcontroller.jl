@@ -1530,8 +1530,9 @@ end
 
 # The outbound half of a process's JSON-RPC connection, when the JSONRPC in use can report
 # it. That queue is unbounded, so a peer that has stopped reading never makes a send fail —
-# the messages simply accumulate, undelivered. Guarded by `isdefined` because the compat
-# bound still allows a JSONRPC without the accessor.
+# the messages simply accumulate, undelivered. Guarded by `isdefined` rather than assumed:
+# JSONRPC is vendored here, not a dependency with a compat bound, so what decides whether the
+# accessor exists is when `packages/JSONRPC` was last re-vendored.
 function _outbound_backlog(ps::TestProcessState)
     ps.endpoint === nothing && return nothing
     isdefined(JSONRPC, :outbound_backlog) || return nothing
