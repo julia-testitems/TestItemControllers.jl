@@ -1528,6 +1528,46 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
     return
 end
 
+# The outbound half of a process's JSON-RPC connection, when the JSONRPC in use can report
+# it. That queue is unbounded, so a peer that has stopped reading never makes a send fail —
+# the messages simply accumulate, undelivered. Guarded by `isdefined` because the compat
+# bound still allows a JSONRPC without the accessor.
+function _outbound_backlog(ps::TestProcessState)
+    ps.endpoint === nothing && return nothing
+    isdefined(JSONRPC, :outbound_backlog) || return nothing
+    return try
+        JSONRPC.outbound_backlog(ps.endpoint)
+    catch
+        nothing
+    end
+end
+
+"""
+What the controller knows about a process at the moment one of its items timed out, as
+`@warn` key/value pairs.
+
+A test process talks to the controller over two independent channels: the JSON-RPC socket
+that carries every result, and the stdout/stderr pipes that carry captured output. A timeout
+is only evidence that the *result* never arrived, and these two clocks are what separate the
+cases. Output still arriving while the socket has gone quiet means the connection died, not
+the test — which is exactly what happened in
+<https://github.com/JuliaControl/ModelPredictiveControl.jl/actions/runs/32420160289>, where a
+test item that had passed 17/17 in 9.8 seconds was reported as a one-hour hang and the only
+way to tell was to reconstruct it from the run's artifacts afterwards.
+"""
+function _timeout_evidence(ps::TestProcessState, diagnostics::Union{Nothing,AbstractString})
+    now = time()
+    elapsed(t) = t === nothing ? nothing : round(now - t, digits=1)
+    backlog = _outbound_backlog(ps)
+    return (
+        seconds_since_last_message = elapsed(ps.last_message_at),
+        seconds_since_last_output = elapsed(ps.last_output_at),
+        watchdog_dump = diagnostics !== nothing,
+        outbound_queued = backlog === nothing ? nothing : backlog.queued,
+        outbound_blocked_seconds = backlog === nothing ? nothing : round(backlog.blocked_seconds, digits=1),
+    )
+end
+
 function handle!(c::TestItemController, msg::TestItemTimeoutMsg)
     if !haskey(c.test_runs, msg.testrun_id) || !haskey(c.test_processes, msg.testprocess_id)
         return false
@@ -1553,13 +1593,16 @@ function handle!(c::TestItemController, msg::TestItemTimeoutMsg)
     item_label = item !== nothing ? item.label : msg.testitem_id
     timeout_val = wu !== nothing && wu.timeout !== nothing ? wu.timeout : "?"
 
-    @warn "Test item '$(item_label)' timed out after $(timeout_val) seconds"
-
-    # Attach whatever the test process's watchdog managed to dump before we report the item
-    # as errored, so the backtrace shows up as that item's output. The dump is absent when
-    # the item wedged without ever reaching a GC safepoint, or when the process has no spare
-    # thread to run the watchdog on — both degrade to today's behaviour.
+    # Read before the warning, so it can report whether the process's own watchdog believed
+    # the item was still running. The dump is absent when the item wedged without ever
+    # reaching a GC safepoint, or when the process has no spare thread to run the watchdog
+    # on — so its absence is evidence, not proof.
     diagnostics = _read_diagnostics(msg.testprocess_id)
+
+    @warn "Test item '$(item_label)' timed out after $(timeout_val) seconds" testprocess_id=msg.testprocess_id _timeout_evidence(ps, diagnostics)...
+
+    # Attach whatever the watchdog managed to dump, so the backtrace shows up as that item's
+    # output.
     if diagnostics !== nothing
         c.callbacks.on_append_output(msg.testrun_id, msg.testitem_id, test_env_id, replace(diagnostics, "\n"=>"\r\n"))
     end
