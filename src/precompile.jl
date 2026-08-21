@@ -122,12 +122,13 @@ using PrecompileTools: @setup_workload, @compile_workload
                 packageUri = "file:///precompile-workload",
                 packageName = "PrecompileWorkload",
             ))
-        # Close the sockets before the endpoints so the read tasks unblock
-        # (close(endpoint) waits on its read task).
-        close(stream_a)
-        close(stream_b)
+        # Endpoints first, then the sockets: this is the order the controller uses at
+        # runtime, and `close(endpoint)` unblocks its own read task through the endpoint
+        # cancellation token — `PipeEndpoint` reads are cancellation-aware.
         try close(client) catch end
         try close(server) catch end
+        close(stream_a)
+        close(stream_b)
         try wait(server_task) catch end
         close(listener)
     end
