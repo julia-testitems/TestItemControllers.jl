@@ -61,7 +61,13 @@ function _convert_perf_stats(perf::Union{Missing,TestItemServerProtocol.PerfStat
     )
 end
 
+# Prepare test process output for embedding in one of our own log records. The child runs
+# with `--color=yes`, so its output is full of ANSI escapes; our log goes to a plain
+# `ConsoleLogger` on stderr, which the extension appends verbatim to an output channel that
+# renders none of them. Stripping before the size check also keeps escape bytes out of the
+# budget, and stops truncation from severing a sequence part way through.
 function _truncate_for_log(s::AbstractString; max_bytes::Int=8192)
+    s = _strip_ansi(s)
     if ncodeunits(s) <= max_bytes
         return s
     end
@@ -484,7 +490,7 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
                     # The only record of why a process died before it could connect. It is
                     # dropped on the floor below, where all that survives is an exit code,
                     # so surface it here while we still have it.
-                    @warn "Test process crashed during startup" testprocess_id exitcode=err.exitcode termsignal=err.termsignal output=err.captured_output
+                    @warn "Test process crashed during startup" testprocess_id exitcode=err.exitcode termsignal=err.termsignal output=_strip_ansi(err.captured_output)
                 end
 
                 if !(err isa CancellationTokens.OperationCanceledException)

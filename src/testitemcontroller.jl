@@ -1802,7 +1802,7 @@ function handle!(c::TestItemController, msg::ActivationFailedMsg)
         error("Received ActivationFailedMsg for process '$(msg.testprocess_id)' in unexpected state '$(state(ps.fsm))'")
     end
 
-    @warn "Environment activation failed for process" testprocess_id=msg.testprocess_id is_precompile=ps.is_precompile_process error=msg.error_message
+    @warn "Environment activation failed for process" testprocess_id=msg.testprocess_id is_precompile=ps.is_precompile_process error=_strip_ansi(msg.error_message)
 
     if ps.testrun_id === nothing || !haskey(c.test_runs, ps.testrun_id)
         error("Received ActivationFailedMsg for process '$(msg.testprocess_id)' with unknown or missing testrun ID '$(ps.testrun_id)'")

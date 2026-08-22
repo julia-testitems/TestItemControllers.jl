@@ -33,6 +33,7 @@ include("json_protocol.jl")
 include("../shared/testserver_protocol.jl")
 include("../shared/urihelper.jl")
 
+include("ansi.jl")
 include("datatypes.jl")
 include("results.jl")
 using .Results

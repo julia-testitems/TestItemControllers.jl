@@ -50,3 +50,29 @@ end
     @test _exit_info_string(nothing, 0) === nothing
     @test _exit_info_string(nothing, nothing) === nothing
 end
+
+@testitem "_truncate_for_log strips ANSI escapes" begin
+    using TestItemControllers: _truncate_for_log
+
+    # Test processes run with `--color=yes`, so anything we fold into our own log records
+    # arrives coloured; the controller log is a plain output channel that renders none of it.
+    @test _truncate_for_log("\e[31mred\e[0m") == "red"
+    @test _truncate_for_log("\e[1;32mbold green\e[0m — καλά 🎉") == "bold green — καλά 🎉"
+    @test _truncate_for_log("\e]0;a title\acleared\e[2K") == "cleared"
+    @test _truncate_for_log("plain text") == "plain text"
+end
+
+@testitem "_truncate_for_log truncates on a character boundary" begin
+    using TestItemControllers: _truncate_for_log
+
+    s = repeat("α", 100)  # 200 bytes
+    r = _truncate_for_log(s; max_bytes=51)
+    @test isvalid(r)
+    @test startswith(r, repeat("α", 25))
+    @test occursin("bytes truncated", r)
+
+    # Escapes are removed before the budget applies, so they cannot eat into it or be
+    # severed part way through.
+    @test _truncate_for_log("\e[31m" * repeat("a", 10) * "\e[0m"; max_bytes=20) ==
+        repeat("a", 10)
+end
