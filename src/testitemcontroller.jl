@@ -37,6 +37,12 @@ the reactor event loop, then use [`execute_testrun`](@ref) to submit work.
   is reported with a warning (default 120). Activation covers the test process's own
   precompilation, so a slow one is normal and is not interrupted; this only makes it visible
   while it is happening instead of only in the post-mortem of whatever kills the run.
+- `activation_timeout_seconds::Union{Nothing,Real}` — how long an environment activation may
+  take before it is abandoned and reported as a failure, or `nothing` (the default) for no
+  limit. Off by default for the same reason the per-test-item timeout is: a legitimate
+  activation is a precompilation, and no one number fits every project. Set it where a stalled
+  activation would otherwise burn a whole CI job, which nothing else covers — the per-item
+  timeout cannot fire, because no item has started.
 
 # Lifecycle
 
@@ -86,6 +92,10 @@ mutable struct TestItemController{CB<:ControllerCallbacks}
     # finished.
     activation_progress_seconds::Float64
 
+    # How long `_activate_env!` waits for an activation before giving up on it, or `nothing`
+    # for no limit — the default, matching the per-test-item timeout.
+    activation_timeout_seconds::Union{Nothing,Float64}
+
     # Scheduling history, in memory and keyed by the (stable) test item id. It survives
     # across the test runs of one session; nothing is persisted to disk.
     schedule::Symbol
@@ -100,7 +110,8 @@ mutable struct TestItemController{CB<:ControllerCallbacks}
         log_level::Symbol=:Info,
         schedule::Symbol=:duration,
         shutdown_grace_seconds::Real=DEFAULT_SHUTDOWN_GRACE_SECONDS,
-        activation_progress_seconds::Real=DEFAULT_ACTIVATION_PROGRESS_SECONDS) where {CB<:ControllerCallbacks}
+        activation_progress_seconds::Real=DEFAULT_ACTIVATION_PROGRESS_SECONDS,
+        activation_timeout_seconds::Union{Nothing,Real}=nothing) where {CB<:ControllerCallbacks}
 
         schedule in (:duration, :contiguous) ||
             throw(ArgumentError("schedule must be :duration or :contiguous, got $(repr(schedule))"))
@@ -108,6 +119,8 @@ mutable struct TestItemController{CB<:ControllerCallbacks}
             throw(ArgumentError("shutdown_grace_seconds must be positive, got $(shutdown_grace_seconds)"))
         activation_progress_seconds > 0 ||
             throw(ArgumentError("activation_progress_seconds must be positive, got $(activation_progress_seconds)"))
+        activation_timeout_seconds === nothing || activation_timeout_seconds > 0 ||
+            throw(ArgumentError("activation_timeout_seconds must be positive or nothing, got $(activation_timeout_seconds)"))
 
         return new{CB}(
             callbacks,
@@ -125,6 +138,7 @@ mutable struct TestItemController{CB<:ControllerCallbacks}
             Float64(shutdown_grace_seconds),
             nothing,
             Float64(activation_progress_seconds),
+            activation_timeout_seconds === nothing ? nothing : Float64(activation_timeout_seconds),
             schedule,
             Dict{String,Symbol}(),
             Dict{String,Float64}(),
@@ -2355,9 +2369,21 @@ function _activate_env!(c::TestItemController, ps::TestProcessState)
         # that names neither the stage nor the process.
         interval = c.activation_progress_seconds
         started = time()
+        # Whether the activation was ever reported as outstanding. If it was, its landing is
+        # worth a line of its own: a log that says "still pending" three times and then goes
+        # quiet reads the same whether the activation finished or the job did.
+        reported_pending = Ref(false)
         progress_timer = Timer(interval, interval=interval) do _
-            @warn "Environment activation still pending" testprocess_id=ps.id package=ps.env.package_name elapsed_seconds=round(time() - started, digits=1)
+            reported_pending[] = true
+            @warn "Environment activation still pending" testprocess_id=ps.id package=ps.env.package_name is_precompile=ps.is_precompile_process elapsed_seconds=round(time() - started, digits=1)
         end
+        # `nothing` — the default — means an activation is allowed to take as long as it
+        # takes, which is the only honest default when it covers a precompilation. Where one
+        # is set, it is the sole guard on this stage: the per-test-item timeout cannot fire
+        # here, because no item has started.
+        deadline_cs = c.activation_timeout_seconds === nothing ? nothing :
+            CancellationTokens.CancellationTokenSource(c.activation_timeout_seconds)
+        deadline_token = deadline_cs === nothing ? nothing : CancellationTokens.get_token(deadline_cs)
         result = try
             JSONRPC.send(
                 ps.endpoint,
@@ -2366,16 +2392,37 @@ function _activate_env!(c::TestItemController, ps::TestProcessState)
                     projectUri = something(ps.env.project_uri, missing),
                     packageUri = ps.env.package_uri,
                     packageName = ps.env.package_name
-                )
+                );
+                client_token = deadline_token
             )
+        catch err
+            # Only the deadline is handled here. Every other cancellation — the endpoint
+            # going away, the run being cancelled — belongs to the outer handler, which
+            # already tells those apart.
+            if err isa CancellationTokens.OperationCanceledException &&
+                    deadline_token !== nothing &&
+                    CancellationTokens.is_cancellation_requested(deadline_token)
+                elapsed = round(time() - started, digits=1)
+                @warn "Environment activation timed out" testprocess_id=ps.id package=ps.env.package_name is_precompile=ps.is_precompile_process elapsed_seconds=elapsed timeout_seconds=c.activation_timeout_seconds
+                put!(c.reactor_channel, ActivationFailedMsg(
+                    ps.id,
+                    "Environment activation timed out after $(c.activation_timeout_seconds) seconds"))
+                return
+            end
+            rethrow()
         finally
             close(progress_timer)
+            deadline_cs === nothing || close(deadline_cs)
         end
 
         if result.status == "failed"
             @warn "Environment activation failed" testprocess_id=ps.id error=coalesce(result.error, "unknown error")
             put!(c.reactor_channel, ActivationFailedMsg(ps.id, coalesce(result.error, "Environment activation failed")))
             return
+        end
+
+        if reported_pending[]
+            @warn "Environment activation completed" testprocess_id=ps.id package=ps.env.package_name is_precompile=ps.is_precompile_process elapsed_seconds=round(time() - started, digits=1)
         end
 
         if ps.is_precompile_process && ps.testrun_id !== nothing

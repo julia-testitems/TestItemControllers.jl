@@ -251,6 +251,68 @@ end
     # It names what is slow, not just that something is.
     @test haskey(first(pending).kwargs, :testprocess_id)
     @test first(pending).kwargs[:elapsed_seconds] > 0
+
+    # And it says when the wait ended. Without this the log is ambiguous between an
+    # activation that finished and a job that was killed while it was still pending; with
+    # several processes outstanding, the shared `testprocess_id` is what pairs them up.
+    completed = filter(r -> r.message == "Environment activation completed", logger.logs)
+    @test !isempty(completed)
+    @test first(completed).kwargs[:testprocess_id] == first(pending).kwargs[:testprocess_id]
+    @test first(completed).kwargs[:elapsed_seconds] >= first(pending).kwargs[:elapsed_seconds]
+end
+
+@testitem "A fast environment activation is not reported at all" setup=[TestHelpers] begin
+    # The completion line is bound to the pending one: an activation nobody was told to wait
+    # for has nothing to report. Otherwise every run would gain a line per process for a
+    # non-event.
+    using Logging: with_logger, Warn
+    using Test: TestLogger
+
+    discovered = TestHelpers.basic_package_discovery()
+    items = filter(i -> i.label == "add works", discovered.items)
+
+    logger = TestLogger(min_level=Warn)
+    result = with_logger(logger) do
+        TestHelpers.run_testrun(items, discovered.setups, discovered)
+    end
+
+    @test length(filter(e -> e.event == :passed, result.events)) == 1
+    @test isempty(filter(r -> r.message == "Environment activation completed", logger.logs))
+end
+
+@testitem "An environment activation that outlives its timeout errors its items" setup=[TestHelpers] begin
+    # The activation timeout is the only guard on this stage: the per-test-item timeout
+    # cannot fire before an item has started, so without this a wedged activation runs until
+    # something outside the controller kills the job. A CI run burned five hours that way.
+    #
+    # The timeout is dialled down far below what a real activation needs, so a *normal* one
+    # trips it — the same trick the progress test uses on its interval.
+    using Logging: with_logger, Warn
+    using Test: TestLogger
+
+    discovered = TestHelpers.basic_package_discovery()
+    items = filter(i -> i.label == "add works", discovered.items)
+    @test length(items) == 1
+
+    logger = TestLogger(min_level=Warn)
+    result = with_logger(logger) do
+        TestHelpers.run_testrun(items, discovered.setups, discovered; activation_timeout_seconds=0.05)
+    end
+
+    # It fails the run rather than hanging it, through the same path a genuinely broken
+    # environment takes.
+    errored = filter(e -> e.event == :errored, result.events)
+    @test length(errored) == length(items)
+    @test isempty(filter(e -> e.event == :passed, result.events))
+    @test occursin("timed out", first(errored).messages[1].message)
+
+    timed_out = filter(r -> r.message == "Environment activation timed out", logger.logs)
+    @test !isempty(timed_out)
+    @test haskey(first(timed_out).kwargs, :testprocess_id)
+    @test first(timed_out).kwargs[:timeout_seconds] == 0.05
+
+    # The process is torn down, not left behind holding the env.
+    @test !isempty(filter(e -> e.event == :process_terminated, result.process_events))
 end
 
 @testitem "activation_progress_seconds must be positive" setup=[TestHelpers] begin
@@ -270,4 +332,26 @@ end
     @test_throws ArgumentError TestItemController(callbacks; activation_progress_seconds=0)
     @test TestItemController(callbacks).activation_progress_seconds ==
         TestItemControllers.DEFAULT_ACTIVATION_PROGRESS_SECONDS
+end
+
+@testitem "activation_timeout_seconds is off by default and must be positive" setup=[TestHelpers] begin
+    import TestItemControllers
+    using TestItemControllers: TestItemController, ControllerCallbacks
+
+    callbacks = ControllerCallbacks(
+        on_testitem_started = (run_id, item_id, test_env_id) -> nothing,
+        on_testitem_passed = (run_id, item_id, test_env_id, duration) -> nothing,
+        on_testitem_failed = (run_id, item_id, test_env_id, messages, duration) -> nothing,
+        on_testitem_errored = (run_id, item_id, test_env_id, messages, duration) -> nothing,
+        on_testitem_skipped = (run_id, item_id, test_env_id) -> nothing,
+        on_append_output = (run_id, item_id, test_env_id, output) -> nothing,
+        on_attach_debugger = (run_id, pipe_name) -> nothing,
+    )
+
+    # Off by default, like the per-test-item timeout: a legitimate activation is a
+    # precompilation, and no one number fits every project.
+    @test TestItemController(callbacks).activation_timeout_seconds === nothing
+    @test TestItemController(callbacks; activation_timeout_seconds=30).activation_timeout_seconds == 30.0
+    @test_throws ArgumentError TestItemController(callbacks; activation_timeout_seconds=0)
+    @test_throws ArgumentError TestItemController(callbacks; activation_timeout_seconds=-1)
 end
