@@ -313,3 +313,39 @@ end
         @test cov[transform_line] !== nothing && cov[transform_line] > 0
     end
 end
+
+@testitem "Coverage counts wider than the platform's Int" begin
+    # Julia's coverage counters are 64 bit on every platform, and `jl_write_coverage_data`
+    # writes out what they hold — a line in a hot loop passes `typemax(Int32)` easily.
+    # Reading that back used to throw an `OverflowError` on a 32 bit run, reported as a
+    # failure of whatever test item was running when coverage was collected.
+    using TestItemControllers: read_lcov_counts, saturating_count
+
+    wide = Int64(typemax(Int32)) + 1
+    lcov = tempname() * ".info"
+    hot = joinpath(@__DIR__, "hot.jl")
+
+    try
+        write(lcov, "SF:$hot\nDA:1,$wide\nDA:2,0\nDA:4,1\nend_of_record\n")
+
+        file_coverage = read_lcov_counts(lcov)
+
+        @test length(file_coverage) == 1
+        @test file_coverage[1].filename == hot
+
+        cov = file_coverage[1].coverage
+        @test length(cov) == 4
+        @test cov[1] == saturating_count(wide)
+        @test cov[2] == 0
+        @test cov[3] === nothing
+        @test cov[4] == 1
+    finally
+        rm(lcov, force=true)
+    end
+
+    # The count survives intact where `Int` is 64 bit, and saturates rather than throwing
+    # where it is not — the vendored `CoverageTools.CovCount` is a `Union{Nothing,Int}` and
+    # cannot be widened from here
+    @test saturating_count(wide) == (Int === Int64 ? wide : typemax(Int))
+    @test saturating_count(nothing) === nothing
+end

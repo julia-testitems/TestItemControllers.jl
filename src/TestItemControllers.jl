@@ -32,6 +32,7 @@ export write_junit_xml, write_lcov
 include("json_protocol.jl")
 include("../shared/testserver_protocol.jl")
 include("../shared/urihelper.jl")
+include("../shared/coverage_counts.jl")
 
 include("datatypes.jl")
 include("results.jl")

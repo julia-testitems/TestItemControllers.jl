@@ -3,13 +3,14 @@ module TestItemServer
 include("pkg_imports.jl")
 
 import .JSONRPC: @dict_readable
-import .CoverageTools: LCOV, amend_coverage_from_src!
+import .CoverageTools: amend_coverage_from_src!
 import .CancellationTokens: CancellationToken
 import Test, Pkg, Sockets
 import Logging
 import Profile
 
 include("../../../shared/testserver_protocol.jl")
+include("../../../shared/coverage_counts.jl")
 
 """
 A crash-reporting handler that returns instead of ending the process, or `nothing` when
@@ -304,7 +305,7 @@ function collect_coverage_data!(coverage_results, roots)
         lcov_filename = tempname() * ".info"
         @ccall jl_write_coverage_data(lcov_filename::Cstring)::Cvoid
         cov_info = try
-            LCOV.readfile(lcov_filename)
+            read_lcov_counts(lcov_filename)
         finally
             rm(lcov_filename)
         end
