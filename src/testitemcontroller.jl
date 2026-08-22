@@ -920,7 +920,12 @@ function handle!(c::TestItemController, msg::TestItemPassedMsg)
         _record_testitem_result!(c, msg.testitem_id, :passed, msg.duration)
 
         if msg.coverage !== nothing
-            append!(tr.coverage, map(i -> CoverageTools.FileCoverage(uri2filepath(i.uri), "", i.coverage), msg.coverage))
+            # `saturating_count` because `CoverageTools.CovCount` is vendored and cannot be
+            # widened: a 64 bit test process can report a count this controller's `Int` does
+            # not hold when the two run at different word sizes.
+            append!(tr.coverage, map(msg.coverage) do i
+                CoverageTools.FileCoverage(uri2filepath(i.uri), "", CoverageTools.CovCount[saturating_count(n) for n in i.coverage])
+            end)
         end
     else
         _log_unexpected_missing_work(tr, msg.testitem_id, msg.testprocess_id, test_env_id, "passed")

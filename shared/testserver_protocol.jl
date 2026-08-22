@@ -62,15 +62,17 @@ TestMessage(message, location) = TestMessage(message, missing, missing, location
     timeoutMs::Union{Missing,Float64}
 end
 
+# `Int64` rather than `Int`: a controller and a test process can run at different word
+# sizes, and Julia's coverage counters are 64 bit on both.
 struct FileCoverage <: JSONRPC.Outbound
     uri::String
-    coverage::Vector{Union{Int,Nothing}}
+    coverage::Vector{Union{Int64,Nothing}}
 end
 
 function FileCoverage(d::Dict)
     return FileCoverage(
         d["uri"],
-        Union{Int,Nothing}[i for i in d["coverage"]]
+        Union{Int64,Nothing}[i for i in d["coverage"]]
     )
 end
 
