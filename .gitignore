@@ -3,3 +3,6 @@
 Manifest.toml
 *.log
 docs/build
+
+# Fixture for the TestEnv merge-project guard: the test manifest is the point of the test.
+!testdata/TestManifestPackage/test/Manifest.toml
