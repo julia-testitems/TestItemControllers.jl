@@ -96,14 +96,17 @@ module Revise
         # `MethodError: no method matching hash(::UInt64, ::UInt64)`, and every test item that
         # loads a package in that process reports the failed callback as its own error.
         #
-        # `packages/` holds git subtrees that are never edited by hand, so the method is
-        # replaced here instead, where this module is assembled. The value only has to identify
-        # a source snapshot within one session, so truncating is fine, and on 64 bit it is the
-        # same value Revise computes. Guarded like the definition it replaces
+        # `packages/` holds git subtrees that are never edited by hand, so the method is added
+        # here instead, where this module is assembled. It is deliberately *more specific* than
+        # the vendored `cache_src_id(inc)` rather than a redefinition of it: redefining is
+        # method overwriting, which Julia rejects outright while this package precompiles. Both
+        # call sites pass a `Base.CacheHeaderIncludes`, so this one wins dispatch. `inc.hash` is
+        # a `UInt32`, so widening it to `UInt` is exact. Guarded like the definition it shadows
         # (https://github.com/JuliaLang/julia/pull/49866); older versions hash `inc.mtime` and
         # are unaffected. Drop this once the fix is in a released Revise.
-        @static if VERSION >= v"1.11.0-DEV.683"
-            cache_src_id(inc) = hash(inc.fsize, inc.hash % UInt)
+        @static if Sys.WORD_SIZE == 32 && VERSION >= v"1.11.0-DEV.683" &&
+                   isdefined(Base, :CacheHeaderIncludes)
+            cache_src_id(inc::Base.CacheHeaderIncludes) = hash(inc.fsize, UInt(inc.hash))
         end
     elseif VERSION >= v"1.6.0"
         using ..OrderedCollections
