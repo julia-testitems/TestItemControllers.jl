@@ -90,6 +90,21 @@ module Revise
         using ...LoweredCodeUtils: next_or_nothing!, callee_matches
 
         include("../../../packages/Revise/src/packagedef.jl")
+
+        # Revise seeds the cache source hash with a `UInt64`, while the seed `hash` takes is a
+        # `UInt` — 32 bits wide on a 32 bit platform. Its package callback dies there with
+        # `MethodError: no method matching hash(::UInt64, ::UInt64)`, and every test item that
+        # loads a package in that process reports the failed callback as its own error.
+        #
+        # `packages/` holds git subtrees that are never edited by hand, so the method is
+        # replaced here instead, where this module is assembled. The value only has to identify
+        # a source snapshot within one session, so truncating is fine, and on 64 bit it is the
+        # same value Revise computes. Guarded like the definition it replaces
+        # (https://github.com/JuliaLang/julia/pull/49866); older versions hash `inc.mtime` and
+        # are unaffected. Drop this once the fix is in a released Revise.
+        @static if VERSION >= v"1.11.0-DEV.683"
+            cache_src_id(inc) = hash(inc.fsize, inc.hash % UInt)
+        end
     elseif VERSION >= v"1.6.0"
         using ..OrderedCollections
         using ..LoweredCodeUtils
