@@ -34,6 +34,7 @@ include("../shared/testserver_protocol.jl")
 include("../shared/urihelper.jl")
 include("../shared/coverage_counts.jl")
 
+include("ansi.jl")
 include("datatypes.jl")
 include("results.jl")
 using .Results

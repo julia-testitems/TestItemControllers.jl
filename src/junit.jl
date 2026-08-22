@@ -12,19 +12,6 @@ profiles produces several test cases with the same `classname`/`name` and differ
 `id`s, which is what a matrix build looks like to a JUnit consumer.
 """
 
-# Strip ANSI escape sequences. Test output is full of them (`Test.jl` colours its failure
-# summaries) and they are meaningless — and, in the C1 control range, illegal — in XML.
-const _ANSI_CSI = r"\e\[[0-9;:<=>?]*[ -/]*[@-~]"
-const _ANSI_OSC = r"\e\][^\a\e]*(?:\a|\e\\)"
-const _ANSI_OTHER = r"\e[@-Z\\-_]"
-
-function _strip_ansi(s::AbstractString)
-    s = replace(s, _ANSI_OSC => "")
-    s = replace(s, _ANSI_CSI => "")
-    s = replace(s, _ANSI_OTHER => "")
-    return s
-end
-
 # XML 1.0 permits tab, newline, carriage return and everything from U+0020 up (minus the
 # surrogates). Anything else has no representation at all — not even as a character
 # reference — so it is dropped rather than escaped.
