@@ -523,5 +523,55 @@
         return (events=events, process_events=process_events, coverage=coverage_result, outputs=outputs, process_output=process_output, runs=runs)
     end
 
+    """
+        dump_run(label, result; items=nothing, tail=4000)
+
+    Print everything the controller reported about a `run_testrun` result, as one `@error`.
+
+    Call this immediately before an assertion that has just been decided the wrong way. What
+    an event stream fails to contain is not something the assertion can show — a
+    `length(passed) == 1 / Evaluated: 0 == 1` on CI says an item did not pass and nothing
+    about what happened to it instead. The messages on the *other* events, and the test
+    processes' own output, are where that lives.
+
+    Pass `items` (any collection of `TestItemDetail`) to have ids rendered as labels.
+    """
+    function dump_run(label::AbstractString, result; items=nothing, tail::Int=4000)
+        names = Dict{String,String}()
+        if items !== nothing
+            for i in items
+                names[i.id] = i.label
+            end
+        end
+        name_of(id) = id === nothing ? "-" : get(names, id, id)
+
+        io = IOBuffer()
+        println(io, "── test item events ──")
+        for e in result.events
+            print(io, "  ", rpad(String(e.event), 9), " ", name_of(get(e, :testitem_id, nothing)))
+            for m in something(get(e, :messages, nothing), ())
+                print(io, "
+              ", _clip(m.message, tail))
+            end
+            println(io)
+        end
+
+        println(io, "── process events ──")
+        for e in result.process_events
+            println(io, "  ", rpad(String(e.event), 18), " ", e.id, haskey(e, :status) ? "  $(e.status)" : "")
+        end
+
+        println(io, "── test process output ──")
+        for (pid, chunks) in result.process_output
+            println(io, "  [", pid, "]")
+            println(io, _clip(join(chunks), tail))
+        end
+
+        @error "$(label): run diagnostics
+$(String(take!(io)))"
+    end
+
+    _clip(s::AbstractString, n::Int) = length(s) <= n ? s : "…" * s[prevind(s, lastindex(s), n - 1):end]
+
     import UUIDs
 end
