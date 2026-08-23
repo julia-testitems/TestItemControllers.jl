@@ -490,7 +490,7 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
                     # The only record of why a process died before it could connect. It is
                     # dropped on the floor below, where all that survives is an exit code,
                     # so surface it here while we still have it.
-                    @warn "Test process crashed during startup" testprocess_id exitcode=err.exitcode termsignal=err.termsignal output=_strip_ansi(err.captured_output)
+                    @warn "Test process crashed during startup" testprocess_id exitcode=err.exitcode term_signal=err.term_signal output=_strip_ansi(err.captured_output)
                 end
 
                 if !(err isa CancellationTokens.OperationCanceledException)

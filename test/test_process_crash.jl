@@ -187,3 +187,27 @@ end
     # The crashed process should have been terminated
     @test length(terminated) == 1
 end
+
+@testitem "The startup-crash warning only reads fields the exception has" begin
+    using TestItemControllers: TestProcessCrashException
+
+    # `@warn` swallows an exception thrown while building its own log record: it prints
+    # "Exception while generating log record" and the run carries on. So a mistyped field name
+    # here is invisible until a process actually dies before it can connect — and then it
+    # destroys the one message explaining why, which is the only record that path produces.
+    # That is exactly what happened: `err.termsignal` against a field named `term_signal`.
+    # Read the record back out of the source and check every field it names really exists.
+    source = read(joinpath(pkgdir(TestItemControllers), "src", "testprocess.jl"), String)
+    line = only(filter(l -> occursin("Test process crashed during startup", l), split(source, '\n')))
+
+    fields = [Symbol(m.captures[1]) for m in eachmatch(r"\berr\.([A-Za-z_][A-Za-z0-9_]*)", line)]
+    @test !isempty(fields)
+    for f in fields
+        @test f in fieldnames(TestProcessCrashException)
+    end
+
+    # And the record must still render for a crash that carries an exit code and a signal.
+    err = TestProcessCrashException("tp-1", 139, 11, "boom")
+    @test err.term_signal == 11
+    @test err.exitcode == 139
+end
