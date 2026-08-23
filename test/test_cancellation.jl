@@ -270,3 +270,106 @@ end
     completed = filter(e -> e.event in (:passed, :failed, :errored, :skipped), events)
     @test length(completed) == length(discovered.items)
 end
+
+@testitem "A run whose token is already cancelled runs nothing" setup=[TestHelpers] begin
+    # Regression: `CancellationTokens.register` invokes its callback immediately for an
+    # already-cancelled token, so the bridge used to post `TestRunCancelledMsg` before the run
+    # was in `controller.test_runs` — the handler's `haskey` guard then dropped it and the run
+    # executed in full. Every item must be skipped and none of them may start.
+    using TestItemControllers: TestItemController, TestRunItem, execute_testrun, shutdown,
+        CancellationTokens, ControllerCallbacks
+    import UUIDs
+
+    pkg_path = joinpath(TestHelpers.TESTDATA_DIR, "BasicPackage")
+    discovered = TestHelpers.discover_test_items(pkg_path)
+
+    events = NamedTuple[]
+    events_lock = ReentrantLock()
+    record = (kind, id) -> lock(events_lock) do; push!(events, (event=kind, testitem_id=id)); end
+
+    callbacks = ControllerCallbacks(
+        on_testitem_started = (run_id, item_id, env_id) -> record(:started, item_id),
+        on_testitem_passed = (run_id, item_id, env_id, duration) -> record(:passed, item_id),
+        on_testitem_failed = (run_id, item_id, env_id, messages, duration) -> record(:failed, item_id),
+        on_testitem_errored = (run_id, item_id, env_id, messages, duration) -> record(:errored, item_id),
+        on_testitem_skipped = (run_id, item_id, env_id) -> record(:skipped, item_id),
+        on_append_output = (run_id, item_id, env_id, output) -> nothing,
+        on_attach_debugger = (run_id, pipe_name) -> nothing,
+    )
+
+    controller = TestItemController(callbacks; log_level=:Debug)
+    test_env = TestHelpers.make_test_environment(; TestHelpers._env_kwargs(discovered)...)
+    work_units = [TestRunItem(item.id, test_env.id, nothing, :Debug) for item in discovered.items]
+
+    cs = CancellationTokens.CancellationTokenSource()
+    CancellationTokens.cancel(cs)   # cancelled *before* the run is submitted
+
+    controller_task = @async try
+        run(controller)
+    catch err
+        @error "Controller error" exception=(err, catch_backtrace())
+    end
+
+    testrun_task = @async execute_testrun(controller, string(UUIDs.uuid4()), [test_env],
+        discovered.items, work_units, discovered.setups, 1, CancellationTokens.get_token(cs))
+
+    TestHelpers.timed_wait(testrun_task, 600; label="precancelled-testrun")
+    shutdown(controller)
+    TestHelpers.timed_wait(controller_task, 600; label="precancelled-controller")
+
+    @test count(e -> e.event === :skipped, events) == length(discovered.items)
+    @test !any(e -> e.event in (:started, :passed, :failed, :errored), events)
+end
+
+@testitem "failfast stops the run at the first failure" setup=[TestHelpers] begin
+    # Every item here fails, and all of them are handed to the one worker as a single batch,
+    # so this only holds if the run is stopped on the reactor in the same step that records
+    # the first failure. A stop requested by a consumer reacting to the callback is appended
+    # to the reactor channel and loses to the next result already queued ahead of it.
+    using TestItemControllers: TestItemController, TestRunItem, execute_testrun, shutdown,
+        ControllerCallbacks
+    import UUIDs
+
+    pkg_path = joinpath(TestHelpers.TESTDATA_DIR, "BasicPackage")
+    discovered = TestHelpers.discover_test_items(pkg_path)
+
+    always_failing = ["failing test", "failing test multiple", "erroring test"]
+    items = filter(i -> i.label in always_failing, discovered.items)
+    @test length(items) == length(always_failing)
+
+    events = NamedTuple[]
+    events_lock = ReentrantLock()
+    record = (kind, id) -> lock(events_lock) do; push!(events, (event=kind, testitem_id=id)); end
+
+    callbacks = ControllerCallbacks(
+        on_testitem_started = (run_id, item_id, env_id) -> record(:started, item_id),
+        on_testitem_passed = (run_id, item_id, env_id, duration) -> record(:passed, item_id),
+        on_testitem_failed = (run_id, item_id, env_id, messages, duration) -> record(:failed, item_id),
+        on_testitem_errored = (run_id, item_id, env_id, messages, duration) -> record(:errored, item_id),
+        on_testitem_skipped = (run_id, item_id, env_id) -> record(:skipped, item_id),
+        on_append_output = (run_id, item_id, env_id, output) -> nothing,
+        on_attach_debugger = (run_id, pipe_name) -> nothing,
+    )
+
+    controller = TestItemController(callbacks; log_level=:Debug)
+    test_env = TestHelpers.make_test_environment(; TestHelpers._env_kwargs(discovered)...)
+    work_units = [TestRunItem(item.id, test_env.id, nothing, :Debug) for item in items]
+
+    controller_task = @async try
+        run(controller)
+    catch err
+        @error "Controller error" exception=(err, catch_backtrace())
+    end
+
+    testrun_task = @async execute_testrun(controller, string(UUIDs.uuid4()), [test_env],
+        items, work_units, discovered.setups, 1, nothing; failfast=true)
+
+    TestHelpers.timed_wait(testrun_task, 600; label="failfast-testrun")
+    shutdown(controller)
+    TestHelpers.timed_wait(controller_task, 600; label="failfast-controller")
+
+    terminal = filter(e -> e.event in (:passed, :failed, :errored, :skipped), events)
+    @test length(terminal) == length(items)
+    @test count(e -> e.event in (:failed, :errored), terminal) == 1
+    @test count(e -> e.event === :skipped, terminal) == length(items) - 1
+end

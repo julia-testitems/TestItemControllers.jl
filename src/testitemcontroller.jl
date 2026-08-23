@@ -704,24 +704,28 @@ function handle!(c::TestItemController, msg::ProcsAcquiredMsg)
     return false
 end
 
-function handle!(c::TestItemController, msg::TestRunCancelledMsg)
-    if !haskey(c.test_runs, msg.testrun_id)
-        return false
-    end
-    tr = c.test_runs[msg.testrun_id]
+"""
+Stop a test run: skip every remaining work unit, kill the processes assigned to it and
+signal its completion. Shared by an outside cancellation and by a failfast stop, which
+differ only in `reason` — the run itself is torn down the same way, because a worker holds
+its whole assigned chunk and killing it is the only way to stop it mid-batch.
 
+Runs on the reactor task and is synchronous, so nothing a worker has already queued can be
+processed between the caller's decision to stop and the run reaching `TestRunCancelled`.
+"""
+function _cancel_testrun!(c::TestItemController, tr::TestRunState; reason::Symbol=:cancelled)
     if state(tr.fsm) in (TestRunCancelled, TestRunCompleted)
-        return false
+        return nothing
     end
 
-    @info "Test run cancelled, skipping $(length(tr.remaining_work)) remaining work unit(s)"
+    @info "Test run stopped ($(reason)), skipping $(length(tr.remaining_work)) remaining work unit(s)"
 
     if state(tr.fsm) == TestRunWaitingForProcs
-        transition!(tr.fsm, TestRunCancelled; reason="cancelled before procs acquired")
+        transition!(tr.fsm, TestRunCancelled; reason="$(reason) before procs acquired")
     elseif state(tr.fsm) in (TestRunProcsAcquired, TestRunRunning)
-        transition!(tr.fsm, TestRunCancelled; reason="cancelled")
+        transition!(tr.fsm, TestRunCancelled; reason=string(reason))
     else
-        transition!(tr.fsm, TestRunCancelled; reason="cancelled from $(state(tr.fsm))")
+        transition!(tr.fsm, TestRunCancelled; reason="$(reason) from $(state(tr.fsm))")
     end
 
     CancellationTokens.cancel(tr.cancellation_source)
@@ -729,7 +733,7 @@ function handle!(c::TestItemController, msg::TestRunCancelledMsg)
     # Report all remaining test items as skipped
     for ((testitem_id, test_env_id), _) in tr.remaining_work
         push!(tr.reported_items, testitem_id)
-        _notify_testitem_skipped(c.callbacks, msg.testrun_id, testitem_id, test_env_id)
+        _notify_testitem_skipped(c.callbacks, tr.id, testitem_id, test_env_id)
     end
     empty!(tr.remaining_work)
 
@@ -745,6 +749,21 @@ function handle!(c::TestItemController, msg::TestRunCancelledMsg)
 
     # Signal completion
     _signal_testrun_completion!(tr, nothing)
+    return nothing
+end
+
+# Record that a work unit of this run reported a terminal failure. Only `failfast` runs act
+# on it, in `_check_testrun_complete!`.
+function _note_failure!(tr::TestRunState)
+    tr.failure_seen = true
+    return nothing
+end
+
+function handle!(c::TestItemController, msg::TestRunCancelledMsg)
+    if !haskey(c.test_runs, msg.testrun_id)
+        return false
+    end
+    _cancel_testrun!(c, c.test_runs[msg.testrun_id]; reason=:cancelled)
     return false
 end
 
@@ -1002,6 +1021,7 @@ function handle!(c::TestItemController, msg::TestItemFailedMsg)
         _remove_from_proc_queue!(tr, msg.testprocess_id, msg.testitem_id)
 
         push!(tr.reported_items, msg.testitem_id)
+        _note_failure!(tr)
         _notify_testitem_failed(c.callbacks,
             msg.testrun_id,
             msg.testitem_id,
@@ -1070,6 +1090,7 @@ function handle!(c::TestItemController, msg::TestItemErroredMsg)
         _remove_from_proc_queue!(tr, msg.testprocess_id, msg.testitem_id)
 
         push!(tr.reported_items, msg.testitem_id)
+        _note_failure!(tr)
         _notify_testitem_errored(c.callbacks,
             msg.testrun_id,
             msg.testitem_id,
@@ -1284,6 +1305,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
             if haskey(tr.remaining_work, work_key) && item !== nothing
                 delete!(tr.remaining_work, work_key)
                 push!(tr.reported_items, testitem_id)
+                _note_failure!(tr)
                 _notify_testitem_errored(c.callbacks,
                     msg.testrun_id,
                     testitem_id,
@@ -1360,6 +1382,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
             "Test process crashed while running test item '$(item_label)'"
         end
         push!(tr.reported_items, crashed_item_id)
+        _note_failure!(tr)
         _notify_testitem_errored(c.callbacks,
             msg.testrun_id,
             crashed_item_id,
@@ -1391,6 +1414,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
                 if haskey(tr.remaining_work, work_key) && item !== nothing
                     delete!(tr.remaining_work, work_key)
                     push!(tr.reported_items, testitem_id)
+                    _note_failure!(tr)
                     _notify_testitem_errored(c.callbacks,
                         msg.testrun_id,
                         testitem_id,
@@ -1422,6 +1446,7 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
                 if haskey(tr.remaining_work, work_key) && item !== nothing
                     delete!(tr.remaining_work, work_key)
                     push!(tr.reported_items, testitem_id)
+                    _note_failure!(tr)
                     _notify_testitem_errored(c.callbacks,
                         msg.testrun_id,
                         testitem_id,
@@ -1635,6 +1660,7 @@ function handle!(c::TestItemController, msg::TestItemTimeoutMsg)
         _remove_from_proc_queue!(tr, msg.testprocess_id, msg.testitem_id)
 
         push!(tr.reported_items, msg.testitem_id)
+        _note_failure!(tr)
         _notify_testitem_errored(c.callbacks,
             msg.testrun_id,
             msg.testitem_id,
@@ -1864,6 +1890,7 @@ function handle!(c::TestItemController, msg::ActivationFailedMsg)
             if haskey(tr.remaining_work, work_key) && item !== nothing
                 delete!(tr.remaining_work, work_key)
                 push!(tr.reported_items, testitem_id)
+                _note_failure!(tr)
                 _notify_testitem_errored(c.callbacks,
                     testrun_id,
                     testitem_id,
@@ -1906,6 +1933,7 @@ function handle!(c::TestItemController, msg::ActivationFailedMsg)
                 if haskey(tr.remaining_work, work_key) && item !== nothing
                     delete!(tr.remaining_work, work_key)
                     push!(tr.reported_items, testitem_id)
+                    _note_failure!(tr)
                     _notify_testitem_errored(c.callbacks,
                         testrun_id,
                         testitem_id,
@@ -2831,6 +2859,13 @@ function _check_testrun_complete!(c::TestItemController, tr::TestRunState)
         end
 
         _signal_testrun_completion!(tr, coverage_results)
+    elseif tr.failfast && tr.failure_seen
+        # The run is not done, but under failfast it is over. Stopping here — synchronously,
+        # on the reactor, in the same step that recorded the failure — is what makes failfast
+        # deterministic: a result the worker has already sent for the next item of its batch
+        # is dropped by the `TestRunCancelled` guard every message handler opens with, instead
+        # of racing a cancellation that a consumer would only be able to append to this queue.
+        _cancel_testrun!(c, tr; reason=:failfast)
     else
         @debug "$(remaining) test item(s) remaining ($(pending_stolen) pending stolen confirmation(s))"
     end
@@ -2862,6 +2897,10 @@ environments use `"Coverage"` mode) or `nothing`.
 
 # Keyword arguments
 - `coverage_root_uris` — if set, only collect coverage for files under these URI prefixes.
+- `failfast` — stop the run as soon as a work unit fails or errors. The remaining work is
+  reported as skipped and the run finishes normally, exactly as an outside cancellation
+  would. The decision is taken on the reactor, in the same step that records the failure, so
+  a result already on its way from a worker cannot slip past it.
 """
 function execute_testrun(
     controller::TestItemController,
@@ -2874,7 +2913,8 @@ function execute_testrun(
     token;
     coverage_root_uris::Union{Nothing,Vector{String}}=nothing,
     gc_between_testitems::Union{Nothing,Bool}=nothing,
-    memory_threshold::Union{Nothing,Float64}=nothing)
+    memory_threshold::Union{Nothing,Float64}=nothing,
+    failfast::Bool=false)
 
     @info "Creating new test run '$(testrun_id)' with $(length(test_items)) test item(s) and $(length(test_environments)) environment(s)"
 
@@ -2893,22 +2933,12 @@ function execute_testrun(
         max_processes;
         coverage_root_uris = coverage_root_uris,
         token = token,
-        memory_threshold = memory_threshold
+        memory_threshold = memory_threshold,
+        failfast = failfast
     )
-
-    # Register cancellation bridge
-    testrun_cancel_registration = nothing
-    if token !== nothing
-        testrun_cancel_registration = CancellationTokens.register(token) do
-            try put!(controller.reactor_channel, TestRunCancelledMsg(testrun_id)) catch end
-        end
-    end
 
     if isempty(test_items)
         @warn "No valid test items to run"
-        if testrun_cancel_registration !== nothing
-            try close(testrun_cancel_registration) catch end
-        end
         return nothing
     end
 
@@ -2947,6 +2977,17 @@ function execute_testrun(
     # Register test run with controller
     controller.test_runs[testrun_id] = tr
     transition!(tr.fsm, TestRunWaitingForProcs; reason="requesting procs")
+
+    # Register the cancellation bridge only now that the run is in `controller.test_runs`
+    # and has left its initial state: `register` invokes its callback immediately when the
+    # token is already cancelled, and a `TestRunCancelledMsg` posted before the run exists
+    # is dropped by the handler's own `haskey` guard — the run would then execute in full.
+    testrun_cancel_registration = nothing
+    if token !== nothing
+        testrun_cancel_registration = CancellationTokens.register(token) do
+            try put!(controller.reactor_channel, TestRunCancelledMsg(testrun_id)) catch end
+        end
+    end
 
     # Build server-side test setup details
     server_test_setups = [

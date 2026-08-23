@@ -128,6 +128,12 @@ mutable struct TestRunState
     # (default: on whenever the run uses more than one process).
     gc_between_testitems::Bool
     memory_threshold::Union{Nothing,Float64}
+    # Stop the run at the first failing or errored work unit. Decided on the reactor rather
+    # than by a consumer reacting to a callback: items are handed to a worker as a batch, so
+    # by the time a consumer-issued cancellation reaches the reactor channel the next result
+    # may already be queued ahead of it and would be recorded as a second failure.
+    failfast::Bool
+    failure_seen::Bool
 end
 
 """
@@ -192,6 +198,7 @@ function TestRunState(
     token::Union{Nothing,CancellationTokens.CancellationToken}=nothing,
     gc_between_testitems::Bool=false,
     memory_threshold::Union{Nothing,Float64}=nothing,
+    failfast::Bool=false,
 )
     cancellation_source = token === nothing ?
         CancellationTokens.CancellationTokenSource() :
@@ -220,6 +227,8 @@ function TestRunState(
         Set{String}(),                              # reported_items
         gc_between_testitems,
         memory_threshold,
+        failfast,
+        false,                                      # failure_seen
     )
 end
 
