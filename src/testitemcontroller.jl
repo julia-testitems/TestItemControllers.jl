@@ -208,9 +208,62 @@ function Base.run(controller::TestItemController)
         msg = take!(controller.reactor_channel)
         @debug "Reactor msg" msg_type=typeof(msg).name.name
 
-        should_stop = handle!(controller, msg)
+        should_stop = try
+            handle!(controller, msg)
+        catch err
+            _handle_reactor_failure!(controller, msg, err, catch_backtrace())
+        end
         should_stop === true && break
     end
+end
+
+# An exception escaping a handler used to kill the reactor loop outright, which failed
+# nothing visibly: every run in flight, and every later `shutdown` call, then waited forever
+# on a channel nothing would ever service again. Two of the handlers carry comments describing
+# exactly that failure mode having happened. So the loop never dies with the controller still
+# running: the failure is logged with its backtrace, the run the message belonged to — when
+# one can be identified — is cancelled so its caller is released, and the loop carries on.
+#
+# The one place carrying on would be wrong is the shutdown path itself: if ShutdownMsg or
+# ShutdownDeadlineMsg failed, the loop would keep waiting for termination messages that the
+# broken handler never arranged, so there the controller is force-stopped instead.
+function _handle_reactor_failure!(c::TestItemController, msg, err, bt)
+    @error "Reactor handler failed; continuing" msg_type=typeof(msg).name.name exception=(err, bt)
+
+    if msg isa ShutdownMsg || msg isa ShutdownDeadlineMsg
+        try
+            for ps in collect(values(c.test_processes))
+                _force_terminate_process!(c, ps; reason="reactor failure during shutdown")
+            end
+        catch cleanup_err
+            @error "Force-termination during reactor failure also failed" exception=(cleanup_err, catch_backtrace())
+        end
+        try
+            # _controller_stopped! transitions ShuttingDown → Stopped; a failure before the
+            # handler reached its own transition leaves the FSM in Running, so step it first.
+            state(c.controller_fsm) == ControllerRunning &&
+                transition!(c.controller_fsm, ControllerShuttingDown; reason="reactor failure during shutdown")
+            _controller_stopped!(c; reason="reactor failure during shutdown")
+        catch stop_err
+            @error "Stopping the controller after a shutdown-path failure also failed" exception=(stop_err, catch_backtrace())
+        end
+        return true
+    end
+
+    testrun_id = hasproperty(msg, :testrun_id) ? msg.testrun_id : nothing
+    if testrun_id === nothing && hasproperty(msg, :testprocess_id)
+        ps = get(c.test_processes, msg.testprocess_id, nothing)
+        ps === nothing || (testrun_id = ps.testrun_id)
+    end
+    if testrun_id !== nothing && haskey(c.test_runs, testrun_id)
+        try
+            _cancel_testrun!(c, c.test_runs[testrun_id]; reason=:reactor_handler_error)
+        catch cancel_err
+            @error "Cancelling the run of a failed reactor message also failed" testrun_id exception=(cancel_err, catch_backtrace())
+        end
+    end
+
+    return false
 end
 
 # ═══════════════════════════════════════════════════════════════════════════════
