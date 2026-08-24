@@ -8,6 +8,13 @@ const DEFAULT_SHUTDOWN_GRACE_SECONDS = 30.0
 # it says so anyway.
 const DEFAULT_ACTIVATION_PROGRESS_SECONDS = 120.0
 
+# How long a test run may go without the reactor processing a single message that concerns
+# it before the heartbeat first warns, and — at twice this — fails the run. The CI hangs
+# this bounds were runs whose workers died without their IO tasks ever reporting it: the
+# reactor sat idle, with remaining work, for six hours until GitHub killed the job. The
+# heartbeat turns that into a loud, attributed failure in minutes.
+const DEFAULT_RUN_STALL_SECONDS = 300.0
+
 """
     TestItemController(callbacks; error_handler_file=nothing, crash_reporting_pipename=nothing, log_level=:Info)
 
@@ -43,6 +50,12 @@ the reactor event loop, then use [`execute_testrun`](@ref) to submit work.
   activation is a precompilation, and no one number fits every project. Set it where a stalled
   activation would otherwise burn a whole CI job, which nothing else covers — the per-item
   timeout cannot fire, because no item has started.
+- `run_stall_seconds::Union{Nothing,Real}` — how long a test run may go without the reactor
+  processing a single message that concerns it before the heartbeat warns with a full
+  process dump, and — at twice this — errors its remaining items and cancels it (default
+  300; `nothing` disables). Unlike every other deadline here this one is on by default: it
+  fires only when *nothing whatsoever* is happening to a run that still has work, which is
+  never legitimate, whereas any single slow step is.
 
 # Lifecycle
 
@@ -96,6 +109,10 @@ mutable struct TestItemController{CB<:ControllerCallbacks}
     # for no limit — the default, matching the per-test-item timeout.
     activation_timeout_seconds::Union{Nothing,Float64}
 
+    # See DEFAULT_RUN_STALL_SECONDS; `nothing` disables the heartbeat entirely.
+    run_stall_seconds::Union{Nothing,Float64}
+    heartbeat_timer::Union{Nothing,Timer}
+
     # Scheduling history, in memory and keyed by the (stable) test item id. It survives
     # across the test runs of one session; nothing is persisted to disk.
     schedule::Symbol
@@ -111,7 +128,8 @@ mutable struct TestItemController{CB<:ControllerCallbacks}
         schedule::Symbol=:duration,
         shutdown_grace_seconds::Real=DEFAULT_SHUTDOWN_GRACE_SECONDS,
         activation_progress_seconds::Real=DEFAULT_ACTIVATION_PROGRESS_SECONDS,
-        activation_timeout_seconds::Union{Nothing,Real}=nothing) where {CB<:ControllerCallbacks}
+        activation_timeout_seconds::Union{Nothing,Real}=nothing,
+        run_stall_seconds::Union{Nothing,Real}=DEFAULT_RUN_STALL_SECONDS) where {CB<:ControllerCallbacks}
 
         schedule in (:duration, :contiguous) ||
             throw(ArgumentError("schedule must be :duration or :contiguous, got $(repr(schedule))"))
@@ -121,8 +139,10 @@ mutable struct TestItemController{CB<:ControllerCallbacks}
             throw(ArgumentError("activation_progress_seconds must be positive, got $(activation_progress_seconds)"))
         activation_timeout_seconds === nothing || activation_timeout_seconds > 0 ||
             throw(ArgumentError("activation_timeout_seconds must be positive or nothing, got $(activation_timeout_seconds)"))
+        run_stall_seconds === nothing || run_stall_seconds > 0 ||
+            throw(ArgumentError("run_stall_seconds must be positive or nothing, got $(run_stall_seconds)"))
 
-        return new{CB}(
+        c = new{CB}(
             callbacks,
             Channel{ReactorMessage}(Inf),
             Dict{String,TestProcessState}(),
@@ -139,11 +159,28 @@ mutable struct TestItemController{CB<:ControllerCallbacks}
             nothing,
             Float64(activation_progress_seconds),
             activation_timeout_seconds === nothing ? nothing : Float64(activation_timeout_seconds),
+            run_stall_seconds === nothing ? nothing : Float64(run_stall_seconds),
+            nothing,                                        # heartbeat_timer
             schedule,
             Dict{String,Symbol}(),
             Dict{String,Float64}(),
             Dict{Tuple{String,String},Float64}(),
         )
+
+        if c.run_stall_seconds !== nothing
+            # Beat at half the stall threshold so a stall is noticed at most 1.5× the
+            # threshold after it began. The channel outlives the timer, so the callback
+            # guards against posting into a closed one during teardown.
+            reactor_channel = c.reactor_channel
+            c.heartbeat_timer = Timer(c.run_stall_seconds / 2; interval=c.run_stall_seconds / 2) do _
+                try
+                    put!(reactor_channel, HeartbeatMsg())
+                catch
+                end
+            end
+        end
+
+        return c
     end
 end
 
@@ -213,6 +250,7 @@ function Base.run(controller::TestItemController)
         catch err
             _handle_reactor_failure!(controller, msg, err, catch_backtrace())
         end
+        _touch_run_activity!(controller, msg)
         should_stop === true && break
     end
 end
@@ -327,7 +365,89 @@ function _controller_stopped!(c::TestItemController; reason::String)
         try close(c.shutdown_timer) catch end
         c.shutdown_timer = nothing
     end
+    if c.heartbeat_timer !== nothing
+        try close(c.heartbeat_timer) catch end
+        c.heartbeat_timer = nothing
+    end
     transition!(c.controller_fsm, ControllerStopped; reason=reason)
+    return nothing
+end
+
+# Record, centrally rather than in thirty handlers, that the reactor just processed a
+# message concerning a run. Anything counts as progress — worker output included — because
+# the stall the heartbeat hunts is total silence: a run whose workers will never send
+# another message of any kind.
+function _touch_run_activity!(c::TestItemController, msg)
+    msg isa HeartbeatMsg && return nothing
+    testrun_id = hasproperty(msg, :testrun_id) ? msg.testrun_id : nothing
+    if testrun_id === nothing && hasproperty(msg, :testprocess_id)
+        ps = get(c.test_processes, msg.testprocess_id, nothing)
+        ps === nothing || (testrun_id = ps.testrun_id)
+    end
+    testrun_id === nothing && return nothing
+    tr = get(c.test_runs, testrun_id, nothing)
+    tr === nothing && return nothing
+    tr.last_activity = time()
+    tr.stall_warned = false
+    return nothing
+end
+
+# The liveness backstop the CI hangs were missing. Every deadline the controller had was
+# scoped to one step — an item, an activation, the shutdown drain — and each depended on
+# some specific message arriving to arm or serve it. A worker that died without its IO task
+# reporting it produced no message at all, so a run could hold remaining work forever while
+# the reactor idled. The heartbeat asks the one question none of those deadlines ask: has
+# *anything* happened to this run lately? One quiet threshold warns with a full dump; twice
+# the threshold fails the remaining items and cancels the run — and the cancellation also
+# releases IO tasks stuck reading from a dead worker, which is how the original hang's
+# missing termination messages finally surfaced when CI cancelled the job.
+function handle!(c::TestItemController, ::HeartbeatMsg)
+    c.run_stall_seconds === nothing && return false
+    state(c.controller_fsm) != ControllerRunning && return false
+
+    now = time()
+    for tr in collect(values(c.test_runs))
+        state(tr.fsm) in (TestRunCancelled, TestRunCompleted) && continue
+        # A debug run paused at a breakpoint is legitimately silent for as long as the user
+        # cares to stare at it — the one case where total quiet is not a fault.
+        any(env -> env.mode == "Debug", tr.test_environments) && continue
+        idle = now - tr.last_activity
+        if idle >= 2 * c.run_stall_seconds
+            @error "Test run has made no progress; failing its remaining items" testrun_id=tr.id idle_seconds=round(idle; digits=1) remaining_work=length(tr.remaining_work) processes=_stall_process_dump(c, tr)
+            _fail_stalled_testrun!(c, tr, idle)
+        elseif idle >= c.run_stall_seconds && !tr.stall_warned
+            tr.stall_warned = true
+            @warn "Test run has made no progress" testrun_id=tr.id idle_seconds=round(idle; digits=1) remaining_work=length(tr.remaining_work) processes=_stall_process_dump(c, tr)
+        end
+    end
+    return false
+end
+
+_stall_process_dump(c::TestItemController, tr::TestRunState) = [
+    (
+        id = ps.id,
+        state = string(state(ps.fsm)),
+        current_testitem = something(ps.current_testitem_id, "none"),
+        seconds_since_message = ps.last_message_at === nothing ? nothing : round(time() - ps.last_message_at; digits=1),
+        seconds_since_output = ps.last_output_at === nothing ? nothing : round(time() - ps.last_output_at; digits=1),
+    )
+    for ps in values(c.test_processes) if ps.testrun_id == tr.id
+]
+
+function _fail_stalled_testrun!(c::TestItemController, tr::TestRunState, idle_seconds::Float64)
+    explanation = "Test run stalled: the controller processed no message concerning this run for $(round(idle_seconds; digits=1)) seconds. " *
+        "A test process most likely died or wedged without reporting it; this item never produced a result."
+    for (testitem_id, test_env_id) in collect(keys(tr.remaining_work))
+        delete!(tr.remaining_work, (testitem_id, test_env_id))
+        push!(tr.reported_items, testitem_id)
+        _note_failure!(tr)
+        _notify_testitem_errored(c.callbacks, tr.id, testitem_id, test_env_id,
+            TestMessage[TestMessage(explanation, nothing, nothing, nothing, nothing, nothing, nothing)],
+            nothing)
+    end
+    # Cancelling also cancels the run token, which releases any IO task still blocked on a
+    # dead worker's pipe, and signals completion so the caller in execute_testrun returns.
+    _cancel_testrun!(c, tr; reason=:stalled)
     return nothing
 end
 

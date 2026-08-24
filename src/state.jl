@@ -134,6 +134,11 @@ mutable struct TestRunState
     # may already be queued ahead of it and would be recorded as a second failure.
     failfast::Bool
     failure_seen::Bool
+    # Liveness bookkeeping for the reactor heartbeat: when the last message affecting this
+    # run was processed, and whether the stall warning for the current quiet spell has
+    # already been emitted. See `handle!(::HeartbeatMsg)`.
+    last_activity::Float64
+    stall_warned::Bool
 end
 
 """
@@ -229,6 +234,8 @@ function TestRunState(
         memory_threshold,
         failfast,
         false,                                      # failure_seen
+        time(),                                     # last_activity
+        false,                                      # stall_warned
     )
 end
 

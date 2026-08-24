@@ -11,6 +11,10 @@ struct ShutdownMsg <: ReactorMessage end
 # it arrives, they are force-killed and dropped so the reactor loop is guaranteed to exit.
 struct ShutdownDeadlineMsg <: ReactorMessage end
 
+# Posted by the controller's repeating heartbeat timer. The handler checks every active test
+# run for lack of progress; see `handle!(::HeartbeatMsg)`.
+struct HeartbeatMsg <: ReactorMessage end
+
 struct GetProcsForTestRunMsg <: ReactorMessage
     testrun_id::String
     proc_count_by_env::Dict{ProcessEnv,Int}
