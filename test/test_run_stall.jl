@@ -17,7 +17,7 @@
 
     # No reactor is running: the handler is driven directly, so the timing is simulated by
     # setting last_activity rather than by sleeping.
-    c = TestItemController(callbacks; run_stall_seconds=10.0)
+    c = TestItemController(callbacks; run_stall_warn_seconds=10.0, run_stall_seconds=20.0)
     try
         tr = TestRunState("stall-run", TestEnvironment[], TestItemDetail[], TestRunItem[],
             TestSetupDetail[], 1)
@@ -52,7 +52,7 @@
         @test !tr_dbg.stall_warned
         @test state(tr_dbg.fsm) == TestRunCreated
 
-        # Past twice the threshold: the run is failed and its caller released.
+        # Past the failing threshold: the run is failed and its caller released.
         tr.last_activity = time() - 21.0
         handle!(c, HeartbeatMsg())
         @test state(tr.fsm) == TestRunCancelled
@@ -91,6 +91,62 @@ end
     # Failed by the heartbeat (≈2×5 s + one beat), not by the 300 s harness timeout and
     # nowhere near the 600 s the wedged worker would sleep.
     @test elapsed < 120
+end
+
+@testitem "The default heartbeat warns but never fails a run" begin
+    using TestItemControllers: TestItemController, ControllerCallbacks, TestRunState,
+        TestEnvironment, TestItemDetail, TestRunItem, TestSetupDetail, HeartbeatMsg,
+        handle!, state, TestRunCreated
+
+    # The failing heartbeat is opt-in. Every default-on kill this controller has shipped
+    # eventually fired on a legitimate run — most recently mid-precompile on a cold CI
+    # cache — so the default may diagnose a stall, loudly, but never act on it.
+    noop = (args...) -> nothing
+    errored = String[]
+    callbacks = ControllerCallbacks(;
+        on_testitem_started = noop, on_testitem_passed = noop, on_testitem_failed = noop,
+        on_testitem_errored = (run_id, item_id, env_id, messages, duration, perf...) ->
+            push!(errored, item_id),
+        on_testitem_skipped = noop, on_append_output = noop, on_attach_debugger = noop,
+    )
+
+    c = TestItemController(callbacks)
+    try
+        # The warn-only heartbeat is armed by default.
+        @test c.run_stall_seconds === nothing
+        @test c.run_stall_warn_seconds == 300.0
+        @test c.heartbeat_timer !== nothing
+
+        tr = TestRunState("default-run", TestEnvironment[], TestItemDetail[], TestRunItem[],
+            TestSetupDetail[], 1)
+        c.test_runs["default-run"] = tr
+
+        # However stale the run is, the default configuration warns and does nothing else.
+        tr.last_activity = time() - 1.0e6
+        handle!(c, HeartbeatMsg())
+        @test tr.stall_warned
+        @test state(tr.fsm) == TestRunCreated
+        @test !isready(tr.completion_channel)
+        @test isempty(errored)
+    finally
+        c.heartbeat_timer === nothing || close(c.heartbeat_timer)
+    end
+
+    # Both thresholds off: no heartbeat timer at all.
+    c2 = TestItemController(callbacks; run_stall_warn_seconds=nothing)
+    try
+        @test c2.heartbeat_timer === nothing
+    finally
+        c2.heartbeat_timer === nothing || close(c2.heartbeat_timer)
+    end
+
+    # Opting in to the fail threshold arms the timer even with the warning off.
+    c3 = TestItemController(callbacks; run_stall_warn_seconds=nothing, run_stall_seconds=15.0)
+    try
+        @test c3.heartbeat_timer !== nothing
+    finally
+        c3.heartbeat_timer === nothing || close(c3.heartbeat_timer)
+    end
 end
 
 @testitem "A busy test process is progress, however quiet the reactor is" begin

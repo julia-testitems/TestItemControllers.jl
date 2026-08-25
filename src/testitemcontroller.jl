@@ -8,13 +8,15 @@ const DEFAULT_SHUTDOWN_GRACE_SECONDS = 30.0
 # it says so anyway.
 const DEFAULT_ACTIVATION_PROGRESS_SECONDS = 120.0
 
-# How long a test run may go with nothing happening to it before the heartbeat first warns,
-# and — at twice this — fails the run. The CI hangs this bounds were runs whose workers died
-# without their IO tasks ever reporting it: the reactor sat idle, with remaining work, for six
-# hours until GitHub killed the job. The heartbeat turns that into a loud, attributed failure
-# in minutes. It can stay this short only because it never counts time in which a worker is
-# busy — see `_run_has_busy_process`.
-const DEFAULT_RUN_STALL_SECONDS = 300.0
+# How long a test run may go with nothing happening to it before the heartbeat warns, with a
+# full process dump. Warning is all the heartbeat does by default: a warning is free, so it
+# can afford a short threshold and the occasional false alarm, and it is what made the CI
+# hangs — runs whose workers died without their IO tasks ever reporting it, idling for six
+# hours until GitHub killed the job — diagnosable from the log. *Failing* a stalled run is
+# opt-in (`run_stall_seconds`): every default-on kill this controller has shipped has
+# eventually fired on a legitimate run, most recently mid-precompile on a cold CI cache, and
+# a wrongly-failed run costs more than a hung one the user can see, diagnose and cancel.
+const DEFAULT_RUN_STALL_WARN_SECONDS = 300.0
 
 """
     TestItemController(callbacks; error_handler_file=nothing, crash_reporting_pipename=nothing, log_level=:Info)
@@ -51,13 +53,18 @@ the reactor event loop, then use [`execute_testrun`](@ref) to submit work.
   activation is a precompilation, and no one number fits every project. Set it where a stalled
   activation would otherwise burn a whole CI job, which nothing else covers — the per-item
   timeout cannot fire, because no item has started.
-- `run_stall_seconds::Union{Nothing,Real}` — how long a test run may go with nothing
-  happening to it before the heartbeat warns with a full process dump, and — at twice this —
-  errors its remaining items and cancels it (default 300; `nothing` disables). Unlike every
-  other deadline here this one is on by default, which it can only afford to be because a
-  process that is *waiting on a worker operation* — activating, revising, running an item —
-  counts as progress for as long as that operation lasts. What is left is a run that holds
-  work while no worker is doing anything about it, which is never legitimate.
+- `run_stall_warn_seconds::Union{Nothing,Real}` — how long a test run may go with nothing
+  happening to it before the heartbeat *warns*, with a full process dump (default 300;
+  `nothing` disables). Warning is all that happens by default; it exists so a genuinely hung
+  run is diagnosable from its log. A process that is waiting on a worker operation —
+  activating, revising, running an item — counts as progress for as long as that operation
+  lasts, so the warning fires only when no worker is doing anything for the run.
+- `run_stall_seconds::Union{Nothing,Real}` — opt-in: fail a stalled run after this many
+  seconds of the same nothing-is-happening idleness, erroring its remaining items and
+  cancelling it. `nothing` — the default — never fails a run for being idle, matching every
+  other deadline here: a bound that can kill a legitimate run must be chosen by the caller,
+  not shipped as a default. Set it in CI, where a hung run otherwise burns the whole job
+  timeout; the warning threshold still applies independently below it.
 
 # Lifecycle
 
@@ -111,7 +118,9 @@ mutable struct TestItemController{CB<:ControllerCallbacks}
     # for no limit — the default, matching the per-test-item timeout.
     activation_timeout_seconds::Union{Nothing,Float64}
 
-    # See DEFAULT_RUN_STALL_SECONDS; `nothing` disables the heartbeat entirely.
+    # See DEFAULT_RUN_STALL_WARN_SECONDS. Warn and fail thresholds are independent;
+    # `nothing` disables each, and with both disabled no heartbeat timer runs at all.
+    run_stall_warn_seconds::Union{Nothing,Float64}
     run_stall_seconds::Union{Nothing,Float64}
     heartbeat_timer::Union{Nothing,Timer}
 
@@ -131,7 +140,8 @@ mutable struct TestItemController{CB<:ControllerCallbacks}
         shutdown_grace_seconds::Real=DEFAULT_SHUTDOWN_GRACE_SECONDS,
         activation_progress_seconds::Real=DEFAULT_ACTIVATION_PROGRESS_SECONDS,
         activation_timeout_seconds::Union{Nothing,Real}=nothing,
-        run_stall_seconds::Union{Nothing,Real}=DEFAULT_RUN_STALL_SECONDS) where {CB<:ControllerCallbacks}
+        run_stall_warn_seconds::Union{Nothing,Real}=DEFAULT_RUN_STALL_WARN_SECONDS,
+        run_stall_seconds::Union{Nothing,Real}=nothing) where {CB<:ControllerCallbacks}
 
         schedule in (:duration, :contiguous) ||
             throw(ArgumentError("schedule must be :duration or :contiguous, got $(repr(schedule))"))
@@ -141,6 +151,8 @@ mutable struct TestItemController{CB<:ControllerCallbacks}
             throw(ArgumentError("activation_progress_seconds must be positive, got $(activation_progress_seconds)"))
         activation_timeout_seconds === nothing || activation_timeout_seconds > 0 ||
             throw(ArgumentError("activation_timeout_seconds must be positive or nothing, got $(activation_timeout_seconds)"))
+        run_stall_warn_seconds === nothing || run_stall_warn_seconds > 0 ||
+            throw(ArgumentError("run_stall_warn_seconds must be positive or nothing, got $(run_stall_warn_seconds)"))
         run_stall_seconds === nothing || run_stall_seconds > 0 ||
             throw(ArgumentError("run_stall_seconds must be positive or nothing, got $(run_stall_seconds)"))
 
@@ -161,6 +173,7 @@ mutable struct TestItemController{CB<:ControllerCallbacks}
             nothing,
             Float64(activation_progress_seconds),
             activation_timeout_seconds === nothing ? nothing : Float64(activation_timeout_seconds),
+            run_stall_warn_seconds === nothing ? nothing : Float64(run_stall_warn_seconds),
             run_stall_seconds === nothing ? nothing : Float64(run_stall_seconds),
             nothing,                                        # heartbeat_timer
             schedule,
@@ -169,12 +182,14 @@ mutable struct TestItemController{CB<:ControllerCallbacks}
             Dict{Tuple{String,String},Float64}(),
         )
 
-        if c.run_stall_seconds !== nothing
-            # Beat at half the stall threshold so a stall is noticed at most 1.5× the
-            # threshold after it began. The channel outlives the timer, so the callback
+        thresholds = [t for t in (c.run_stall_warn_seconds, c.run_stall_seconds) if t !== nothing]
+        if !isempty(thresholds)
+            # Beat at half the smallest armed threshold so a stall is noticed at most 1.5×
+            # that threshold after it began. The channel outlives the timer, so the callback
             # guards against posting into a closed one during teardown.
+            period = minimum(thresholds) / 2
             reactor_channel = c.reactor_channel
-            c.heartbeat_timer = Timer(c.run_stall_seconds / 2; interval=c.run_stall_seconds / 2) do _
+            c.heartbeat_timer = Timer(period; interval=period) do _
                 try
                     put!(reactor_channel, HeartbeatMsg())
                 catch
@@ -432,12 +447,14 @@ _run_has_busy_process(c::TestItemController, tr::TestRunState) = any(
 # some specific message arriving to arm or serve it. A worker that died without its IO task
 # reporting it produced no message at all, so a run could hold remaining work forever while
 # the reactor idled. The heartbeat asks the one question none of those deadlines ask: is
-# anything at all working on this run? One quiet threshold warns with a full dump; twice the
-# threshold fails the remaining items and cancels the run — and the cancellation also
-# releases IO tasks stuck reading from a dead worker, which is how the original hang's
-# missing termination messages finally surfaced when CI cancelled the job.
+# anything at all working on this run? By default the answer is only ever *reported* — a
+# warning with a full process dump, which is what makes a hung run diagnosable from its log.
+# Failing the run's remaining items and cancelling it is opt-in (`run_stall_seconds`); when
+# opted in, the cancellation also releases IO tasks stuck reading from a dead worker, which
+# is how the original hang's missing termination messages finally surfaced when CI cancelled
+# the job.
 function handle!(c::TestItemController, ::HeartbeatMsg)
-    c.run_stall_seconds === nothing && return false
+    c.run_stall_warn_seconds === nothing && c.run_stall_seconds === nothing && return false
     state(c.controller_fsm) != ControllerRunning && return false
 
     now = time()
@@ -455,10 +472,10 @@ function handle!(c::TestItemController, ::HeartbeatMsg)
             continue
         end
         idle = now - tr.last_activity
-        if idle >= 2 * c.run_stall_seconds
+        if c.run_stall_seconds !== nothing && idle >= c.run_stall_seconds
             @error "Test run has made no progress; failing its remaining items" testrun_id=tr.id idle_seconds=round(idle; digits=1) remaining_work=length(tr.remaining_work) processes=_stall_process_dump(c, tr)
             _fail_stalled_testrun!(c, tr, idle)
-        elseif idle >= c.run_stall_seconds && !tr.stall_warned
+        elseif c.run_stall_warn_seconds !== nothing && idle >= c.run_stall_warn_seconds && !tr.stall_warned
             tr.stall_warned = true
             @warn "Test run has made no progress" testrun_id=tr.id idle_seconds=round(idle; digits=1) remaining_work=length(tr.remaining_work) processes=_stall_process_dump(c, tr)
         end
