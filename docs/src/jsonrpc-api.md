@@ -168,7 +168,7 @@ arrive twice while the other never resolves.
 | `id` | `String` | Process identifier. |
 | `packageName` | `String` | Package under test. |
 | `packageUri` | `String \| null` | File URI of the package root. |
-| `projectUri` | `String \| null` | File URI of the custom project, if any. |
+| `projectUri` | `String \| null` | File URI of the project supplying the manifest, or `null` for the package folder itself. |
 | `coverage` | `Boolean` | Whether coverage is enabled. |
 | `env` | `Object<String, String \| null>` | Environment variables. |
 
@@ -209,11 +209,12 @@ the [Julia API](@ref) section.
 | `juliaNumThreads` | `String \| null` | `JULIA_NUM_THREADS` value. |
 | `juliaEnv` | `Object<String, String \| null>` | Additional env vars. |
 | `mode` | `String` | `"Normal"`, `"Coverage"`, or `"Debug"`. |
-| `packageName` | `String` | |
-| `packageUri` | `String` | |
-| `projectUri` | `String \| null` | |
-| `envContentHash` | `String \| null` | |
+| `packageName` | `String` | Name of the package under test. Its test target defines the environment's dependencies. |
+| `packageUri` | `String` | File URI of the package root — the folder whose `Project.toml` carries `name`, `uuid` and `version`. |
+| `projectUri` | `String \| null` | File URI of the project whose `Manifest.toml` supplies the version pins, or `null` to use the package folder as the source environment. Pins only: its `[deps]` never become importable. Must be the package folder itself or a project whose manifest `dev`s the package. |
+| `envContentHash` | `String \| null` | Opaque hash of everything the environment is built from. A pooled process whose hash still matches is revised; one whose hash differs is restarted. |
 | `checkBounds` | `String \| null` | Value for the `--check-bounds` flag. |
+| `color` | `Boolean \| null` | Start the test process with `--color=yes`, so its output carries ANSI escape sequences. |
 
 ### `TestRunItem`
 

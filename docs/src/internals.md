@@ -123,7 +123,7 @@ The 11 states model the full lifecycle of a child Julia process:
 | `ProcessRevising` | Running `Revise.revise()` in the child process. |
 | `ProcessStarting` | Launching a new Julia child process. |
 | `ProcessWaitingForPrecompile` | Waiting for environment precompilation to finish. |
-| `ProcessActivatingEnv` | Activating the package environment in the child process. |
+| `ProcessActivatingEnv` | Building and activating the test environment in the child process. |
 | `ProcessConfiguringTestRun` | Sending test run configuration (setups, coverage settings). |
 | `ProcessReadyToRun` | Configured and ready to receive test items. |
 | `ProcessRunning` | Executing test items. |
@@ -155,7 +155,8 @@ TestRunCreated → TestRunWaitingForProcs → TestRunProcsAcquired → TestRunRu
 `ProcessEnv` is an internal struct that serves as the dictionary key for the
 process pool. It captures the subset of [`TestEnvironment`](@ref) fields that
 determine process identity: `project_uri`, `package_uri`, `package_name`,
-`juliaCmd`, `juliaArgs`, `juliaNumThreads`, `mode`, and `env`. Custom `hash`
+`juliaCmd`, `juliaArgs`, `juliaNumThreads`, `mode`, `env`, `check_bounds`, and
+`color`. Custom `hash`
 and `==` methods ensure that two environments with the same configuration
 share a pool slot.
 
@@ -219,6 +220,39 @@ A test run proceeds through these stages:
    coverage data is aggregated and the result is put into the run's
    `completion_channel`, which `execute_testrun()` is blocking on.
 
+### Environment activation
+
+Stage 3 above is the most involved step in the system, and none of it is visible
+from the `activateEnv` request. The child process receives only `packageName`,
+`packageUri` and an optional `projectUri`, and builds the environment itself:
+
+1. The **source environment** is `projectUri` when the controller supplied one,
+   and `packageUri` otherwise.
+2. That folder is **mirrored into a throwaway scratch environment** rather than
+   activated directly — `TestEnv.activate` runs `Pkg.instantiate` on whatever is
+   active, which would resolve a `Manifest.toml` into the user's folder. The
+   mirror is deliberately nameless and carries the package as an ordinary
+   path-tracked dependency; `testprocess/TestItemServer/src/scratch_env.jl`
+   explains why in its header comment. Preferences travel separately, through a
+   dedicated environment directory appended to `LOAD_PATH`, because
+   `TestEnv.activate` replaces the active project again in the next step.
+3. `TestEnv.activate(packageName)` then builds the **test environment** from the
+   package's test target — `<package>/test/Project.toml` if it exists, otherwise
+   the package's own `[deps]` plus `[targets].test` resolved through `[extras]`
+   and `[weakdeps]` — plus the package itself, and makes a temporary directory
+   of its own the active project.
+4. `Pkg.Operations.sandbox_preserve` prunes the mirrored manifest to that test
+   target's transitive closure and merges it in.
+
+So `projectUri` contributes **version pins, not dependencies**, which is the same
+thing `Pkg.test` does when run from a dev environment. The user-facing account of
+the selection rules that produce `packageUri`/`projectUri` in the first place
+lives at [julia-testitems.org/guide/environments](https://julia-testitems.org/guide/environments).
+
+The controller serializes this request across processes — one is nominated to
+activate while the others wait — so that the test environment's precompile caches
+are built exactly once. See `_activate_env!` in `testitemcontroller.jl`.
+
 ### Cancellation and timeouts
 
 - Each test run has a `CancellationTokenSource`. If the caller's token fires,
@@ -237,7 +271,7 @@ second JSONRPC layer defined in `TestItemServerProtocol` (in
 
 | Method | Description |
 |:-------|:------------|
-| `activateEnv` | Activate the package environment and load imports. |
+| `activateEnv` | Build and activate the test environment, and load imports. |
 | `testserver/revise` | Run `Revise.revise()` and report whether a restart is needed. |
 | `testserver/ConfigureTestRun` | Send test setups, coverage settings, and log level. |
 | `testserver/runTestItems` | Execute a batch of test items. |

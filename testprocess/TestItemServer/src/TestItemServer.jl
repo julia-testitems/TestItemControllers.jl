@@ -740,7 +740,7 @@ function _run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mod
                     testItemId = params.id,
                     messages = [
                         TestItemServerProtocol.TestMessage(
-                            "Unable to load the `Test` package. Please ensure that `Test` is listed as a test dependency in the Project.toml for the package.",
+                            "Unable to load the `Test` package. Please ensure that `Test` is listed as a test dependency of the package — in `test/Project.toml` if the package has one, otherwise in `[extras]` and the `test` entry of `[targets]` in its Project.toml.",
                             TestItemServerProtocol.Location(
                                 params.uri,
                                 TestItemServerProtocol.Position(params.line, 1)
