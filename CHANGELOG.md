@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- A selected project nested inside the package now replaces the package's canonical test environment instead of being combined with it. Its dependencies and preferences remain active, while the package checkout is added automatically. ([#97](https://github.com/julia-testitems/TestItemControllers.jl/issues/97))
 - `Logging` is now declared in the test target. `test/test_worker_lifecycle.jl` does `using Logging`, so `Pkg.test()` always ended in `ArgumentError: Package Logging not found in current path` — meaning the test item covering the slow-activation warning had never actually run.
 
 ### Added

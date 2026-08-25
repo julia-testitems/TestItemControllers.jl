@@ -185,6 +185,22 @@ The child loads `testprocess/app/testserver_main.jl` which starts a
 `TestItemServer` that communicates with the controller over a named-pipe
 JSONRPC connection.
 
+### Environment activation
+
+The child mirrors the selected project into a scratch directory and binds the
+package checkout into that copy. Activation then uses one of two strategies:
+
+- A selected `projectUri` strictly inside `packageUri` is the complete test
+  environment. The scratch copy is instantiated directly, so its dependencies
+  and preferences remain active and the package's canonical test dependencies
+  are not added.
+- Equal, enclosing, and external project paths retain the `Pkg.test`-style
+  behavior: the preference carrier is appended to `LOAD_PATH` and
+  `TestEnv.activate` builds the package's canonical test environment.
+
+Both strategies run inside the controller's serialized activation and
+precompilation gate.
+
 ### Output demultiplexing
 
 Child processes interleave output from multiple test items on a single
