@@ -8,11 +8,12 @@ const DEFAULT_SHUTDOWN_GRACE_SECONDS = 30.0
 # it says so anyway.
 const DEFAULT_ACTIVATION_PROGRESS_SECONDS = 120.0
 
-# How long a test run may go without the reactor processing a single message that concerns
-# it before the heartbeat first warns, and — at twice this — fails the run. The CI hangs
-# this bounds were runs whose workers died without their IO tasks ever reporting it: the
-# reactor sat idle, with remaining work, for six hours until GitHub killed the job. The
-# heartbeat turns that into a loud, attributed failure in minutes.
+# How long a test run may go with nothing happening to it before the heartbeat first warns,
+# and — at twice this — fails the run. The CI hangs this bounds were runs whose workers died
+# without their IO tasks ever reporting it: the reactor sat idle, with remaining work, for six
+# hours until GitHub killed the job. The heartbeat turns that into a loud, attributed failure
+# in minutes. It can stay this short only because it never counts time in which a worker is
+# busy — see `_run_has_busy_process`.
 const DEFAULT_RUN_STALL_SECONDS = 300.0
 
 """
@@ -50,12 +51,13 @@ the reactor event loop, then use [`execute_testrun`](@ref) to submit work.
   activation is a precompilation, and no one number fits every project. Set it where a stalled
   activation would otherwise burn a whole CI job, which nothing else covers — the per-item
   timeout cannot fire, because no item has started.
-- `run_stall_seconds::Union{Nothing,Real}` — how long a test run may go without the reactor
-  processing a single message that concerns it before the heartbeat warns with a full
-  process dump, and — at twice this — errors its remaining items and cancels it (default
-  300; `nothing` disables). Unlike every other deadline here this one is on by default: it
-  fires only when *nothing whatsoever* is happening to a run that still has work, which is
-  never legitimate, whereas any single slow step is.
+- `run_stall_seconds::Union{Nothing,Real}` — how long a test run may go with nothing
+  happening to it before the heartbeat warns with a full process dump, and — at twice this —
+  errors its remaining items and cancels it (default 300; `nothing` disables). Unlike every
+  other deadline here this one is on by default, which it can only afford to be because a
+  process that is *waiting on a worker operation* — activating, revising, running an item —
+  counts as progress for as long as that operation lasts. What is left is a run that holds
+  work while no worker is doing anything about it, which is never legitimate.
 
 # Lifecycle
 
@@ -375,8 +377,9 @@ end
 
 # Record, centrally rather than in thirty handlers, that the reactor just processed a
 # message concerning a run. Anything counts as progress — worker output included — because
-# the stall the heartbeat hunts is total silence: a run whose workers will never send
-# another message of any kind.
+# the stall the heartbeat hunts is a run that nothing is working on. Messages are only half
+# of that picture; the other half is `_run_has_busy_process`, for the stages that produce no
+# message at all for as long as they last.
 function _touch_run_activity!(c::TestItemController, msg)
     msg isa HeartbeatMsg && return nothing
     testrun_id = hasproperty(msg, :testrun_id) ? msg.testrun_id : nothing
@@ -392,13 +395,45 @@ function _touch_run_activity!(c::TestItemController, msg)
     return nothing
 end
 
+# Phases in which the controller is waiting on a worker operation it has already handed
+# over. Each produces no reactor message for as long as it lasts, and each is either guarded
+# by a deadline of its own or deliberately unbounded, so none of them is the heartbeat's
+# business:
+#
+#   * `ProcessActivatingEnv` — bounded by `activation_timeout_seconds`, whose default of
+#     `nothing` is a deliberate choice, because an activation covers a precompilation;
+#   * `ProcessWaitingForPrecompile` — waiting on another process that is itself activating;
+#   * `ProcessRevising` — a Revise pass over changed files;
+#   * `ProcessRunning` — bounded by the test item's own timeout.
+#
+# Every remaining phase is either transient controller-side bookkeeping or `ProcessStarting`,
+# where a worker that never connects is exactly the hang this heartbeat exists to catch.
+const BUSY_PROCESS_PHASES = (
+    ProcessRevising,
+    ProcessWaitingForPrecompile,
+    ProcessActivatingEnv,
+    ProcessRunning,
+)
+
+# Is any worker on this run mid-operation? Without this the heartbeat measured reactor
+# silence, which a healthy cold-cache CI run produces in bulk: an activation is a single
+# async JSON-RPC round trip, so between the "Activating" status and the activation landing
+# nothing reaches the reactor at all. In run 32794123684 of ModelPredictiveControl.jl every
+# leg spent 660-1100s there, and two were killed mid-precompile with all 98 items errored —
+# while the controller was logging "Environment activation still pending, is_precompile =
+# true" every two minutes. A long test item that prints nothing had the same problem: output
+# counts as activity, so only the silent ones tripped it.
+_run_has_busy_process(c::TestItemController, tr::TestRunState) = any(
+    ps -> ps.testrun_id == tr.id && state(ps.fsm) in BUSY_PROCESS_PHASES,
+    values(c.test_processes))
+
 # The liveness backstop the CI hangs were missing. Every deadline the controller had was
 # scoped to one step — an item, an activation, the shutdown drain — and each depended on
 # some specific message arriving to arm or serve it. A worker that died without its IO task
 # reporting it produced no message at all, so a run could hold remaining work forever while
-# the reactor idled. The heartbeat asks the one question none of those deadlines ask: has
-# *anything* happened to this run lately? One quiet threshold warns with a full dump; twice
-# the threshold fails the remaining items and cancels the run — and the cancellation also
+# the reactor idled. The heartbeat asks the one question none of those deadlines ask: is
+# anything at all working on this run? One quiet threshold warns with a full dump; twice the
+# threshold fails the remaining items and cancels the run — and the cancellation also
 # releases IO tasks stuck reading from a dead worker, which is how the original hang's
 # missing termination messages finally surfaced when CI cancelled the job.
 function handle!(c::TestItemController, ::HeartbeatMsg)
@@ -411,6 +446,14 @@ function handle!(c::TestItemController, ::HeartbeatMsg)
         # A debug run paused at a breakpoint is legitimately silent for as long as the user
         # cares to stare at it — the one case where total quiet is not a fault.
         any(env -> env.mode == "Debug", tr.test_environments) && continue
+        # A busy worker is progress, and it restarts the clock rather than merely skipping
+        # this tick: when the operation finishes, the run gets the whole threshold again
+        # before anything calls it stalled.
+        if _run_has_busy_process(c, tr)
+            tr.last_activity = now
+            tr.stall_warned = false
+            continue
+        end
         idle = now - tr.last_activity
         if idle >= 2 * c.run_stall_seconds
             @error "Test run has made no progress; failing its remaining items" testrun_id=tr.id idle_seconds=round(idle; digits=1) remaining_work=length(tr.remaining_work) processes=_stall_process_dump(c, tr)
@@ -435,8 +478,15 @@ _stall_process_dump(c::TestItemController, tr::TestRunState) = [
 ]
 
 function _fail_stalled_testrun!(c::TestItemController, tr::TestRunState, idle_seconds::Float64)
-    explanation = "Test run stalled: the controller processed no message concerning this run for $(round(idle_seconds; digits=1)) seconds. " *
-        "A test process most likely died or wedged without reporting it; this item never produced a result."
+    # Name what the processes were actually doing. The first version of this said a process
+    # "most likely died or wedged", which was flatly wrong every time the heartbeat misfired.
+    procs = _stall_process_dump(c, tr)
+    doing = isempty(procs) ? "The run had no test process at all." :
+        "Test processes: " * join(
+            ("$(p.id) $(p.state)" * (p.current_testitem == "none" ? "" : " on '$(p.current_testitem)'") for p in procs),
+            ", ") * "."
+    explanation = "Test run stalled: for $(round(idle_seconds; digits=1)) seconds no worker was busy on this run and the controller heard nothing about it. " *
+        "$(doing) A test process most likely died or wedged without reporting it; this item never produced a result."
     for (testitem_id, test_env_id) in collect(keys(tr.remaining_work))
         delete!(tr.remaining_work, (testitem_id, test_env_id))
         push!(tr.reported_items, testitem_id)
