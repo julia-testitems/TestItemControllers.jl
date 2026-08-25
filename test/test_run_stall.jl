@@ -92,3 +92,144 @@ end
     # nowhere near the 600 s the wedged worker would sleep.
     @test elapsed < 120
 end
+
+@testitem "A busy test process is progress, however quiet the reactor is" begin
+    using TestItemControllers: TestItemController, ControllerCallbacks, TestRunState,
+        TestEnvironment, TestItemDetail, TestRunItem, TestSetupDetail, HeartbeatMsg,
+        TestProcessState, ProcessEnv, BUSY_PROCESS_PHASES, ProcessStarting,
+        ProcessActivatingEnv, ProcessWaitingForPrecompile, ProcessRevising, ProcessRunning,
+        ProcessReviseOrStart, ProcessConfiguringTestRun, ProcessReadyToRun,
+        handle!, state, transition!, TestRunCancelled, TestRunCreated
+
+    # The regression this guards: on a cold cache every leg of
+    # ModelPredictiveControl.jl run 32794123684 sat in `ProcessActivatingEnv` for 660-1100s
+    # while its worker precompiled, which produces no reactor message at all. Two of them
+    # were killed mid-precompile with every one of their 98 items errored.
+    noop = (args...) -> nothing
+    errored = String[]
+    callbacks = ControllerCallbacks(;
+        on_testitem_started = noop, on_testitem_passed = noop, on_testitem_failed = noop,
+        on_testitem_errored = (run_id, item_id, env_id, messages, duration, perf...) ->
+            push!(errored, messages[1].message),
+        on_testitem_skipped = noop, on_append_output = noop, on_attach_debugger = noop,
+    )
+
+    env = TestEnvironment("env-1", "julia", String[], nothing,
+        Dict{String,Union{String,Nothing}}(), "Normal", "Pkg", "file:///pkg", nothing,
+        nothing, nothing, false)
+
+    function fresh_controller()
+        c = TestItemController(callbacks; run_stall_seconds=10.0)
+        tr = TestRunState("run-1", [env], TestItemDetail[], TestRunItem[],
+            TestSetupDetail[], 1)
+        c.test_runs["run-1"] = tr
+        ps = TestProcessState("proc-1", ProcessEnv(env))
+        ps.testrun_id = "run-1"
+        c.test_processes["proc-1"] = ps
+        return (c, tr, ps)
+    end
+
+    # The FSM only accepts legal transitions, so each phase is reached the way a real
+    # process reaches it.
+    PATH_TO = Dict(
+        ProcessRevising              => [ProcessReviseOrStart, ProcessRevising],
+        ProcessWaitingForPrecompile  => [ProcessStarting, ProcessWaitingForPrecompile],
+        ProcessActivatingEnv         => [ProcessStarting, ProcessActivatingEnv],
+        ProcessRunning               => [ProcessStarting, ProcessActivatingEnv,
+                                         ProcessConfiguringTestRun, ProcessReadyToRun,
+                                         ProcessRunning],
+    )
+    drive_to!(ps, phase) = foreach(p -> transition!(ps.fsm, p), PATH_TO[phase])
+
+    # Every phase in which the controller is waiting on the worker exempts the run, no
+    # matter how far past twice the threshold it is.
+    @test issetequal(keys(PATH_TO), BUSY_PROCESS_PHASES)
+    for phase in BUSY_PROCESS_PHASES
+        c, tr, ps = fresh_controller()
+        try
+            drive_to!(ps, phase)
+            @test state(ps.fsm) == phase
+            tr.last_activity = time() - 10_000.0
+            handle!(c, HeartbeatMsg())
+            @test state(tr.fsm) == TestRunCreated
+            @test !tr.stall_warned
+            # The clock is restarted, not merely skipped: when the operation ends the run
+            # gets the whole threshold again before anything calls it stalled.
+            @test time() - tr.last_activity < 1.0
+        finally
+            c.heartbeat_timer === nothing || close(c.heartbeat_timer)
+        end
+    end
+
+    # `ProcessStarting` is deliberately *not* exempt: a worker that launches and never
+    # connects is the hang the heartbeat exists to catch, and it looks exactly like this.
+    c, tr, ps = fresh_controller()
+    try
+        @test !(ProcessStarting in BUSY_PROCESS_PHASES)
+        transition!(ps.fsm, ProcessStarting)
+        tr.last_activity = time() - 21.0
+        handle!(c, HeartbeatMsg())
+        @test state(tr.fsm) == TestRunCancelled
+    finally
+        c.heartbeat_timer === nothing || close(c.heartbeat_timer)
+    end
+
+    # A process belonging to a *different* run does not shield this one.
+    c, tr, ps = fresh_controller()
+    try
+        drive_to!(ps, ProcessActivatingEnv)
+        ps.testrun_id = "some-other-run"
+        tr.last_activity = time() - 21.0
+        handle!(c, HeartbeatMsg())
+        @test state(tr.fsm) == TestRunCancelled
+    finally
+        c.heartbeat_timer === nothing || close(c.heartbeat_timer)
+    end
+end
+
+@testitem "The stall explanation says what the processes were doing" begin
+    using TestItemControllers: TestItemController, ControllerCallbacks, TestRunState,
+        TestEnvironment, TestItemDetail, TestRunItem, TestSetupDetail, HeartbeatMsg,
+        TestProcessState, ProcessEnv, ProcessStarting, handle!, transition!
+
+    # The first version of this message asserted a test process "most likely died or
+    # wedged", which was flatly wrong every time the heartbeat misfired. Whatever it
+    # concludes, it now has to show its working.
+    noop = (args...) -> nothing
+    messages = String[]
+    callbacks = ControllerCallbacks(;
+        on_testitem_started = noop, on_testitem_passed = noop, on_testitem_failed = noop,
+        on_testitem_errored = (run_id, item_id, env_id, msgs, duration, perf...) ->
+            push!(messages, msgs[1].message),
+        on_testitem_skipped = noop, on_append_output = noop, on_attach_debugger = noop,
+    )
+
+    env = TestEnvironment("env-1", "julia", String[], nothing,
+        Dict{String,Union{String,Nothing}}(), "Normal", "Pkg", "file:///pkg", nothing,
+        nothing, nothing, false)
+    item = TestItemDetail("item-1", "file:///pkg/test/a.jl", "item-1", "Pkg", "file:///pkg",
+        true, String[], 1, 1, "@test true", 1, 1)
+
+    c = TestItemController(callbacks; run_stall_seconds=10.0)
+    try
+        tr = TestRunState("run-1", [env], [item],
+            [TestRunItem("item-1", "env-1", nothing, :Info)], TestSetupDetail[], 1)
+        tr.remaining_work[("item-1", "env-1")] = TestRunItem("item-1", "env-1", nothing, :Info)
+        c.test_runs["run-1"] = tr
+
+        ps = TestProcessState("proc-1", ProcessEnv(env))
+        ps.testrun_id = "run-1"
+        transition!(ps.fsm, ProcessStarting)
+        c.test_processes["proc-1"] = ps
+
+        tr.last_activity = time() - 21.0
+        handle!(c, HeartbeatMsg())
+
+        @test length(messages) == 1
+        @test occursin("no worker was busy", messages[1])
+        @test occursin("proc-1", messages[1])
+        @test occursin("ProcessStarting", messages[1])
+    finally
+        c.heartbeat_timer === nothing || close(c.heartbeat_timer)
+    end
+end
