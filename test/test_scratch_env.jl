@@ -84,6 +84,43 @@ end
     include(joinpath(@__DIR__, "..", "testprocess", "TestItemServer", "src", "scratch_env.jl"))
 end
 
+@testitem "Strict descendant paths are classified by canonical components" setup=[ScratchEnvImpl] begin
+    work = mktempdir()
+    package_path = joinpath(work, "Package")
+    child = joinpath(package_path, "test")
+    deep_child = joinpath(child, "nested")
+    sibling = joinpath(work, "Sibling")
+    lexical_prefix = joinpath(work, "PackageMore")
+    mkpath(deep_child)
+    mkpath(sibling)
+    mkpath(lexical_prefix)
+
+    @test !ScratchEnvImpl._is_strict_descendant(package_path, package_path)
+    @test ScratchEnvImpl._is_strict_descendant(child, package_path)
+    @test ScratchEnvImpl._is_strict_descendant(deep_child, package_path)
+    @test !ScratchEnvImpl._is_strict_descendant(package_path, child)
+    @test !ScratchEnvImpl._is_strict_descendant(sibling, package_path)
+    @test !ScratchEnvImpl._is_strict_descendant(lexical_prefix, package_path)
+    @test ScratchEnvImpl._is_strict_descendant(child * (Sys.iswindows() ? "\\" : "/"), package_path)
+    @test !ScratchEnvImpl._is_strict_descendant(joinpath(work, "missing"), package_path)
+    @test !ScratchEnvImpl._is_strict_descendant(child, joinpath(work, "missing"))
+
+    alias_path = joinpath(work, "Alias")
+    escape_path = joinpath(package_path, "escape")
+    symlink(package_path, alias_path)
+    symlink(sibling, escape_path)
+    @test ScratchEnvImpl._is_strict_descendant(joinpath(alias_path, "test"), package_path)
+    @test !ScratchEnvImpl._is_strict_descendant(escape_path, package_path)
+
+    if Sys.iswindows()
+        @test ScratchEnvImpl._is_strict_descendant(uppercase(child), lowercase(package_path))
+        roots = filter(ispath, [string(letter, ":\\") for letter in 'A':'Z'])
+        if length(roots) > 1
+            @test !ScratchEnvImpl._is_strict_descendant(roots[2], roots[1])
+        end
+    end
+end
+
 @testitem "materialize_scratch_env strips package identity" setup=[ScratchEnvHelpers, ScratchEnvImpl] begin
     import Pkg
 
@@ -132,12 +169,17 @@ end
         name="Relative",
         uuid="a1b2c3d4-0001-0002-0003-000000000202"
     )
+    other_path = ScratchEnvHelpers.materialize_package(
+        joinpath(work, "packages", "OtherRelative");
+        name="OtherRelative",
+        uuid="a1b2c3d4-0001-0002-0003-000000000209"
+    )
 
     project_path = joinpath(work, "env")
     mkpath(project_path)
     write(joinpath(project_path, "Project.toml"), """
     [deps]
-    Relative = "a1b2c3d4-0001-0002-0003-000000000202"
+    OtherRelative = "a1b2c3d4-0001-0002-0003-000000000209"
     """)
     write(joinpath(project_path, "Manifest.toml"), """
     julia_version = "$(VERSION)"
@@ -148,22 +190,74 @@ end
     path = "../packages/Relative"
     uuid = "a1b2c3d4-0001-0002-0003-000000000202"
     version = "0.1.0"
+
+    [[deps.OtherRelative]]
+    path = "../packages/OtherRelative"
+    uuid = "a1b2c3d4-0001-0002-0003-000000000209"
+    version = "0.2.0"
     """)
 
-    env = ScratchEnvImpl.materialize_scratch_env(project_path, "Relative")
+    env = ScratchEnvImpl.materialize_scratch_env(project_path, "Relative", pkg_path)
 
     manifest = Pkg.TOML.parsefile(joinpath(env.dir, "Manifest.toml"))
     @test manifest["deps"]["Relative"][1]["path"] == normpath(pkg_path)
+    @test manifest["deps"]["OtherRelative"][1]["path"] == normpath(other_path)
+    @test manifest["deps"]["OtherRelative"][1]["version"] == "0.2.0"
 
     # Recorded against the source project's dependency list, which the wrapper's
     # differs from; Pkg treats its absence as "unknown" and stays quiet.
     @test !haskey(manifest, "project_hash")
 
     project = Pkg.TOML.parsefile(joinpath(env.dir, "Project.toml"))
+    @test project["deps"]["Relative"] == "a1b2c3d4-0001-0002-0003-000000000202"
     @test project["sources"]["Relative"]["path"] == normpath(pkg_path)
 
-    @test env.develop_path === nothing
+    @test isempty(env.develop_paths)
     @test Pkg.Types.read_manifest(joinpath(env.dir, "Manifest.toml")) isa Pkg.Types.Manifest
+end
+
+@testitem "The package checkout is validated and participates in the scratch cache key" setup=[ScratchEnvHelpers, ScratchEnvImpl] begin
+    import Pkg
+
+    work = mktempdir()
+    project_path = joinpath(work, "env")
+    mkpath(project_path)
+    write(joinpath(project_path, "Project.toml"), "")
+
+    first_checkout = ScratchEnvHelpers.materialize_package(
+        joinpath(work, "first", "Cached");
+        name="Cached",
+        uuid="a1b2c3d4-0001-0002-0003-000000000210"
+    )
+    second_checkout = ScratchEnvHelpers.materialize_package(
+        joinpath(work, "second", "Cached");
+        name="Cached",
+        uuid="a1b2c3d4-0001-0002-0003-000000000210"
+    )
+
+    first_env = ScratchEnvImpl.scratch_env(project_path, "Cached", first_checkout)
+    second_env = ScratchEnvImpl.scratch_env(project_path, "Cached", second_checkout)
+    @test first_env.dir != second_env.dir
+    for (env, checkout) in ((first_env, first_checkout), (second_env, second_checkout))
+        project = Pkg.TOML.parsefile(joinpath(env.dir, "Project.toml"))
+        @test project["sources"]["Cached"]["path"] == realpath(checkout)
+    end
+
+    missing_project = joinpath(work, "missing-project")
+    mkpath(missing_project)
+    @test_throws ErrorException ScratchEnvImpl.materialize_scratch_env(project_path, "Cached", missing_project)
+
+    wrong_name = ScratchEnvHelpers.materialize_package(
+        joinpath(work, "WrongName");
+        name="WrongName",
+        uuid="a1b2c3d4-0001-0002-0003-000000000211"
+    )
+    @test_throws ErrorException ScratchEnvImpl.materialize_scratch_env(project_path, "Cached", wrong_name)
+
+    invalid_uuid = joinpath(work, "InvalidUuid")
+    mkpath(invalid_uuid)
+    write(joinpath(invalid_uuid, "Project.toml"), "name = \"Cached\"\nuuid = \"invalid\"\n")
+    @test_throws ErrorException ScratchEnvImpl.materialize_scratch_env(project_path, "Cached", invalid_uuid)
 end
 
 @testitem "materialize_scratch_env carries LocalPreferences.toml along" setup=[ScratchEnvHelpers, ScratchEnvImpl] begin
