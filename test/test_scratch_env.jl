@@ -413,11 +413,30 @@ end
         uuid="a1b2c3d4-0001-0002-0003-000000000103"
     )
 
+    ScratchEnvHelpers.materialize_package(
+        joinpath(work, "packages", "CanonicalOnly");
+        name="CanonicalOnly",
+        uuid="a1b2c3d4-0001-0002-0003-000000000104"
+    )
+    write(joinpath(pkg_path, "test", "Project.toml"), """
+    [deps]
+    CanonicalOnly = "a1b2c3d4-0001-0002-0003-000000000104"
+    """)
+    write(joinpath(pkg_path, "test", "tests.jl"), """
+    @testitem "Member uses its canonical test dependency" begin
+        using Member
+        using CanonicalOnly
+        @test Member.greet() == "hello from Member"
+        @test CanonicalOnly.greet() == "hello from CanonicalOnly"
+    end
+    """)
+
     project_path = joinpath(work, "env")
     mkpath(project_path)
     write(joinpath(project_path, "Project.toml"), """
     [deps]
     Member = "a1b2c3d4-0001-0002-0003-000000000103"
+    CanonicalOnly = "a1b2c3d4-0001-0002-0003-000000000104"
     """)
     write(joinpath(project_path, "Manifest.toml"), """
     julia_version = "$(VERSION)"
@@ -426,6 +445,11 @@ end
     [[deps.Member]]
     path = "../packages/Member"
     uuid = "a1b2c3d4-0001-0002-0003-000000000103"
+    version = "0.1.0"
+
+    [[deps.CanonicalOnly]]
+    path = "../packages/CanonicalOnly"
+    uuid = "a1b2c3d4-0001-0002-0003-000000000104"
     version = "0.1.0"
     """)
 
@@ -448,6 +472,28 @@ end
 
     @test ScratchEnvHelpers.snapshot(pkg_path) == pkg_before
     @test ScratchEnvHelpers.snapshot(project_path) == project_before
+end
+
+@testitem "A selected nested project is the complete test environment" setup=[TestHelpers, ScratchEnvHelpers] begin
+    using TestItemControllers: filepath2uri
+
+    package_path = joinpath(TestHelpers.TESTDATA_DIR, "NestedEnvironmentPackage")
+    selected_project = joinpath(package_path, "test", "nested")
+    before = ScratchEnvHelpers.snapshot(package_path)
+
+    discovered = TestHelpers.nested_package_discovery()
+    @test length(discovered.items) == 3
+    @test discovered.package_uri == filepath2uri(package_path)
+    @test discovered.project_uri == filepath2uri(selected_project)
+
+    result = TestHelpers.run_testrun(discovered; max_procs=2, n_runs=2)
+    @test all(run -> count(e -> e.event == :passed, run.events) == 3, result.runs)
+    @test count(e -> e.event == :process_created, result.process_events) == 2
+    @test ScratchEnvHelpers.snapshot(package_path) == before
+
+    coverage = TestHelpers.run_testrun(discovered; mode="Coverage")
+    @test count(e -> e.event == :passed, coverage.events) == 3
+    @test ScratchEnvHelpers.snapshot(package_path) == before
 end
 
 @testitem "Test items run against a copy of the environment, not the original" setup=[TestHelpers, ScratchEnvHelpers] begin

@@ -87,6 +87,7 @@
     end
 
     const _BASIC_PACKAGE = Ref{Any}(nothing)
+    const _NESTED_PACKAGE = Ref{Any}(nothing)
 
     """
         basic_package_discovery()
@@ -102,6 +103,21 @@
 
             discovered = discover_test_items(joinpath(TESTDATA_DIR, "BasicPackage"))
             _BASIC_PACKAGE[] = discovered
+            return discovered
+        end
+    end
+
+    function nested_package_discovery()
+        lock(_HELPER_LOCK) do
+            cached = _NESTED_PACKAGE[]
+            cached === nothing || return cached
+
+            package_path = joinpath(TESTDATA_DIR, "NestedEnvironmentPackage")
+            discovered = discover_test_items(
+                package_path;
+                active_project=joinpath(package_path, "test", "nested")
+            )
+            _NESTED_PACKAGE[] = discovered
             return discovered
         end
     end
@@ -159,6 +175,16 @@
         @test occursin("intentional error", errored_events[1].messages[1].message)
         @test length(skipped_events) == 0
 
+        nested = nested_package_discovery()
+        nested_result = run_testrun(
+            nested;
+            julia_cmd="julia",
+            julia_args=["+$version"],
+            timeout=PLATFORM_RUN_TIMEOUT,
+            env=isolated_depot_env(version)
+        )
+        @test count(e -> e.event == :passed, nested_result.events) == length(nested.items)
+
         return
     end
 
@@ -198,8 +224,9 @@
     _line(pos) = hasproperty(pos, :line) ? pos.line : pos[1]
     _column(pos) = hasproperty(pos, :column) ? pos.column : pos[2]
 
-    function discover_test_items(pkg_path::String)
+    function discover_test_items(pkg_path::String; active_project=nothing)
         jw = workspace_from_folders([pkg_path])
+        active_project === nothing || set_active_project!(jw, JuliaWorkspaces.URIs2.filepath2uri(active_project))
         td_dict = get_test_items(jw)
 
         items = TestItemDetail[]
