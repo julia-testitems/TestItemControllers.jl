@@ -1180,7 +1180,12 @@ function activate_env_request(params::TestItemServerProtocol.ActivateEnvParams, 
             :selected_project : :package_test_environment
         @debug "Activating test environment" strategy
 
-        scratch = scratch_env(source_path, params.packageName, package_path)
+        scratch = scratch_env(
+            source_path,
+            params.packageName,
+            package_path;
+            preferences_carrier=strategy !== :selected_project,
+        )
 
         Pkg.activate(scratch.dir)
 

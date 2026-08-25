@@ -272,11 +272,14 @@ end
     flavour = "vanilla"
     """)
 
-    env = ScratchEnvImpl.materialize_scratch_env(pkg_path, "Preferred")
+    env = ScratchEnvImpl.materialize_scratch_env(
+        pkg_path, "Preferred", pkg_path; preferences_carrier=false
+    )
 
     mirrored = joinpath(env.dir, "LocalPreferences.toml")
     @test isfile(mirrored)
     @test occursin("vanilla", read(mirrored, String))
+    @test env.preferences_dir === nothing
 end
 
 @testitem "No preferences means no carrier environment" setup=[ScratchEnvHelpers, ScratchEnvImpl] begin

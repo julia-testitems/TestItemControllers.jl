@@ -79,9 +79,9 @@ The result of [`materialize_scratch_env`](@ref).
 * `develop_paths` — package folders the caller must `Pkg.develop` *after*
   activating `dir`. Only set on Julia versions without `[sources]` support
   when the source environment has no usable manifest.
-* `preferences_dir` — an environment directory carrying nothing but the source
-  environment's preferences, which the caller must append to `LOAD_PATH`, or
-  `nothing` when the source environment sets no preferences.
+* `preferences_dir` — when requested, an environment directory carrying nothing
+  but the source environment's preferences, which the caller must append to
+  `LOAD_PATH`, or `nothing` when no carrier is needed.
 """
 struct ScratchEnv
     dir::String
@@ -89,27 +89,28 @@ struct ScratchEnv
     preferences_dir::Union{Nothing,String}
 end
 
-const _SCRATCH_ENVS = Dict{Tuple{String,String,String},ScratchEnv}()
+const _SCRATCH_ENVS = Dict{Tuple{String,String,String,Bool},ScratchEnv}()
 
 """
-    scratch_env(project_path, package_name, package_path) -> ScratchEnv
+    scratch_env(project_path, package_name, package_path; preferences_carrier=true) -> ScratchEnv
 
 [`materialize_scratch_env`](@ref), memoized for the lifetime of the process so
 that repeated activations of the same environment do not pile up temporary
 directories. A test process is only ever used for one environment, so the cache
 never needs invalidating.
 """
-function scratch_env(project_path::AbstractString, package_name::AbstractString, package_path::Union{Nothing,AbstractString})
+function scratch_env(project_path::AbstractString, package_name::AbstractString, package_path::Union{Nothing,AbstractString}; preferences_carrier::Bool=true)
     key = (
         realpath(project_path),
         String(package_name),
         package_path === nothing ? "" : realpath(package_path),
+        preferences_carrier,
     )
 
     cached = get(_SCRATCH_ENVS, key, nothing)
     cached === nothing || return cached
 
-    env = materialize_scratch_env(key[1], key[2], isempty(key[3]) ? nothing : key[3])
+    env = materialize_scratch_env(key[1], key[2], isempty(key[3]) ? nothing : key[3]; preferences_carrier=key[4])
     _SCRATCH_ENVS[key] = env
     return env
 end
@@ -438,7 +439,7 @@ function _write_toml(path::AbstractString, data::AbstractDict)
 end
 
 """
-    materialize_scratch_env(project_path, package_name, package_path) -> ScratchEnv
+    materialize_scratch_env(project_path, package_name, package_path; preferences_carrier=true) -> ScratchEnv
 
 Build a scratch environment mirroring the one at `project_path` and return it.
 The environment at `project_path` is only ever read.
@@ -453,7 +454,7 @@ versions the user has pinned. When it does not — or when the manifest is in a
 format this Julia cannot read and cannot be downgraded — there is nothing to
 preserve and TestEnv's `Pkg.instantiate` resolves one into the scratch directory.
 """
-function materialize_scratch_env(project_path::AbstractString, package_name::AbstractString, package_path::Union{Nothing,AbstractString})
+function materialize_scratch_env(project_path::AbstractString, package_name::AbstractString, package_path::Union{Nothing,AbstractString}; preferences_carrier::Bool=true)
     src_dir = abspath(project_path)
 
     project_file = _find_env_file(src_dir, _PROJECT_NAMES)
@@ -566,7 +567,8 @@ function materialize_scratch_env(project_path::AbstractString, package_name::Abs
 
     # That copy only covers the stretch where the scratch environment is the
     # active one. `TestEnv.activate` takes that away again, hence the carrier.
-    preferences_dir = materialize_preferences_carrier(source_preferences, preference_owners, local_preferences)
+    preferences_dir = preferences_carrier ?
+        materialize_preferences_carrier(source_preferences, preference_owners, local_preferences) : nothing
 
     return ScratchEnv(env_dir, develop_paths, preferences_dir)
 end
