@@ -1166,26 +1166,48 @@ function activate_env_request(params::TestItemServerProtocol.ActivateEnvParams, 
         source_path = source_uri=="" ? nothing : uri2filepath(source_uri)
 
         source_path===nothing && error("Cannot activate an environment: `$source_uri` is not a file path.")
+        source_path = realpath(source_path)
 
-        scratch = scratch_env(source_path, params.packageName)
+        package_path = params.packageUri=="" ? nothing : uri2filepath(params.packageUri)
+        if package_path===nothing
+            params.packageName=="" || error("Cannot locate the package checkout: `$(params.packageUri)` is not a file path.")
+        else
+            package_path = realpath(package_path)
+        end
+
+        strategy = params.projectUri!==missing && package_path!==nothing &&
+            _is_strict_descendant(source_path, package_path) ?
+            :selected_project : :package_test_environment
+        @debug "Activating test environment" strategy
+
+        scratch = scratch_env(
+            source_path,
+            params.packageName,
+            package_path;
+            preferences_carrier=strategy !== :selected_project,
+        )
 
         Pkg.activate(scratch.dir)
 
-        if scratch.develop_path!==nothing
-            Pkg.develop(Pkg.PackageSpec(path=scratch.develop_path))
+        if !isempty(scratch.develop_paths)
+            Pkg.develop([Pkg.PackageSpec(path=path) for path in scratch.develop_paths])
         end
 
-        # `TestEnv.activate` replaces the active project with a temporary
-        # directory of its own and precompiles in it, so preferences have to
-        # reach the test environment through the load path — which it leaves
-        # alone — rather than through the active project. Appended, so that
-        # preferences of the test environment itself take precedence.
-        if scratch.preferences_dir!==nothing && !(scratch.preferences_dir in LOAD_PATH)
-            push!(LOAD_PATH, scratch.preferences_dir)
-        end
+        if strategy === :selected_project
+            Pkg.instantiate()
+        else
+            # `TestEnv.activate` replaces the active project with a temporary
+            # directory of its own and precompiles in it, so preferences have to
+            # reach the test environment through the load path — which it leaves
+            # alone — rather than through the active project. Appended, so that
+            # preferences of the test environment itself take precedence.
+            if scratch.preferences_dir!==nothing && !(scratch.preferences_dir in LOAD_PATH)
+                push!(LOAD_PATH, scratch.preferences_dir)
+            end
 
-        if params.packageName!=""
-            TestEnv.activate(params.packageName)
+            if params.packageName!=""
+                TestEnv.activate(params.packageName)
+            end
         end
 
         # The controller serializes this request: one test process is nominated to activate
@@ -1195,12 +1217,9 @@ function activate_env_request(params::TestItemServerProtocol.ActivateEnvParams, 
         # package race, and on Windows the loser cannot replace a `.ji` the winner holds
         # open, so it dies with "Cannot write cache file".
         #
-        # From Julia 1.9 on, `TestEnv.activate` finishes with `Pkg._auto_precompile` on the
-        # sandbox environment, so the caches really are built inside that window. The older
-        # variants stop at `Pkg.activate`, and `Pkg.instantiate` did not precompile before
-        # Julia 1.6 either — so nothing was compiled until the first `using` inside a test
-        # item, which happens in every test process at once, after the gate has let them all
-        # go. Precompiling here puts that work back inside the serialized window.
+        # From Julia 1.9 on, both activation routes precompile while this request is in the
+        # serialized window. Older `TestEnv` variants stop at `Pkg.activate`, and
+        # `Pkg.instantiate` did not precompile before Julia 1.6 — so compile explicitly here.
         @static if VERSION < v"1.9"
             try
                 # `Pkg.precompile` does not exist before Julia 1.4 — it only became a

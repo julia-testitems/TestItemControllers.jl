@@ -10,8 +10,8 @@
 # activate that.
 #
 # The wrapper is deliberately nameless (no `name`/`uuid`/`version`) and carries
-# the source project's own package as an ordinary path-tracked dependency. That
-# is not a stylistic choice: Pkg derives the root package's source location from
+# packages as ordinary path-tracked dependencies. That is not a stylistic
+# choice: Pkg derives a root package's source location from
 # `dirname(env.project_file)` in two places —
 #
 #   * `Pkg.Operations.sandbox_preserve`, which injects the root entry with
@@ -76,40 +76,47 @@ const _STRIPPED_PROJECT_KEYS = (
 The result of [`materialize_scratch_env`](@ref).
 
 * `dir` — the scratch environment's directory, ready to be passed to `Pkg.activate`.
-* `develop_path` — a package folder the caller must `Pkg.develop` *after*
-  activating `dir`, or `nothing`. Only ever set on Julia versions without
-  `[sources]` support and only when the source environment has no manifest, in
-  which case there is no declarative way to pin the package to its folder.
-* `preferences_dir` — an environment directory carrying nothing but the source
-  environment's preferences, which the caller must append to `LOAD_PATH`, or
-  `nothing` when the source environment sets no preferences.
+* `develop_paths` — package folders the caller must `Pkg.develop` *after*
+  activating `dir`. Only set on Julia versions without `[sources]` support
+  when the source environment has no usable manifest.
+* `preferences_dir` — when requested, an environment directory carrying nothing
+  but the source environment's preferences, which the caller must append to
+  `LOAD_PATH`, or `nothing` when no carrier is needed.
 """
 struct ScratchEnv
     dir::String
-    develop_path::Union{Nothing,String}
+    develop_paths::Vector{String}
     preferences_dir::Union{Nothing,String}
 end
 
-const _SCRATCH_ENVS = Dict{Tuple{String,String},ScratchEnv}()
+const _SCRATCH_ENVS = Dict{Tuple{String,String,String,Bool},ScratchEnv}()
 
 """
-    scratch_env(project_path, package_name) -> ScratchEnv
+    scratch_env(project_path, package_name, package_path; preferences_carrier=true) -> ScratchEnv
 
 [`materialize_scratch_env`](@ref), memoized for the lifetime of the process so
 that repeated activations of the same environment do not pile up temporary
 directories. A test process is only ever used for one environment, so the cache
 never needs invalidating.
 """
-function scratch_env(project_path::AbstractString, package_name::AbstractString)
-    key = (abspath(project_path), String(package_name))
+function scratch_env(project_path::AbstractString, package_name::AbstractString, package_path::Union{Nothing,AbstractString}; preferences_carrier::Bool=true)
+    key = (
+        realpath(project_path),
+        String(package_name),
+        package_path === nothing ? "" : realpath(package_path),
+        preferences_carrier,
+    )
 
     cached = get(_SCRATCH_ENVS, key, nothing)
     cached === nothing || return cached
 
-    env = materialize_scratch_env(key[1], key[2])
+    env = materialize_scratch_env(key[1], key[2], isempty(key[3]) ? nothing : key[3]; preferences_carrier=key[4])
     _SCRATCH_ENVS[key] = env
     return env
 end
+
+scratch_env(project_path::AbstractString, package_name::AbstractString) =
+    scratch_env(project_path, package_name, package_name == "" ? nothing : project_path)
 
 function _find_env_file(dir::AbstractString, names)
     for name in names
@@ -121,6 +128,26 @@ end
 
 _abs_path(base::AbstractString, path::AbstractString) =
     isabspath(path) ? normpath(path) : normpath(joinpath(base, path))
+
+# `relpath` is component-aware, unlike a string-prefix test. Canonicalizing both
+# sides also makes equality and symlink aliases unambiguous. Old Julia versions
+# on Windows did not make `realpath` prove existence, so check it explicitly.
+function _is_strict_descendant(path::AbstractString, parent::AbstractString)
+    try
+        ispath(path) && ispath(parent) || return false
+        canonical_path = realpath(path)
+        canonical_parent = realpath(parent)
+        if Sys.iswindows()
+            canonical_path = lowercase(canonical_path)
+            canonical_parent = lowercase(canonical_parent)
+        end
+        relative = relpath(canonical_path, canonical_parent)
+        return relative != "." && !isabspath(relative) && match(r"^\.\.(?:[/\\]|$)", relative) === nothing
+    catch err
+        err isa InterruptException && rethrow()
+        return false
+    end
+end
 
 # Manifests come in two shapes. Format 1.0 (Julia <= 1.6) is a bare mapping of
 # package name to a vector of entries; format 2.0 nests that mapping under
@@ -242,35 +269,6 @@ function _upsert_manifest_entry!(manifest::AbstractDict, name::AbstractString, u
     end
 
     return entry
-end
-
-# Where does `package_name` actually live? Only needed for a package under test
-# that is not the source project's own package; a registered (non-path)
-# dependency legitimately has no answer here and needs none, because the
-# manifest already tells Pkg where to find it.
-function _find_package_path(project::AbstractDict, manifest, base::AbstractString, package_name::AbstractString)
-    sources = get(project, "sources", nothing)
-    if sources isa AbstractDict
-        source = get(sources, package_name, nothing)
-        if source isa AbstractDict
-            path = get(source, "path", nothing)
-            path isa AbstractString && return _abs_path(base, path)
-        end
-    end
-
-    if manifest !== nothing
-        found = nothing
-        _each_manifest_entry(manifest) do name, entry
-            if found === nothing && name == package_name
-                path = get(entry, "path", nothing)
-                # Already absolutized by `_absolutize_manifest!`.
-                path isa AbstractString && (found = path)
-            end
-        end
-        found === nothing || return found
-    end
-
-    return nothing
 end
 
 # `[compat]` and `[sources]` entries must name something that is still listed as
@@ -441,14 +439,14 @@ function _write_toml(path::AbstractString, data::AbstractDict)
 end
 
 """
-    materialize_scratch_env(project_path, package_name) -> ScratchEnv
+    materialize_scratch_env(project_path, package_name, package_path; preferences_carrier=true) -> ScratchEnv
 
 Build a scratch environment mirroring the one at `project_path` and return it.
 The environment at `project_path` is only ever read.
 
-The result is safe to `Pkg.activate` before calling `TestEnv.activate(package_name)`:
-every write TestEnv performs then lands in the scratch directory or in TestEnv's
-own temporary directory, never in the user's folder.
+The result is safe to `Pkg.activate` before either `Pkg.instantiate()` or
+`TestEnv.activate(package_name)`: every write then lands in the scratch
+directory or in TestEnv's own temporary directory, never in the user's folder.
 
 When the source environment has a manifest it is copied over (with relative
 paths made absolute), so the test environment resolves against exactly the
@@ -456,7 +454,7 @@ versions the user has pinned. When it does not — or when the manifest is in a
 format this Julia cannot read and cannot be downgraded — there is nothing to
 preserve and TestEnv's `Pkg.instantiate` resolves one into the scratch directory.
 """
-function materialize_scratch_env(project_path::AbstractString, package_name::AbstractString)
+function materialize_scratch_env(project_path::AbstractString, package_name::AbstractString, package_path::Union{Nothing,AbstractString}; preferences_carrier::Bool=true)
     src_dir = abspath(project_path)
 
     project_file = _find_env_file(src_dir, _PROJECT_NAMES)
@@ -509,29 +507,38 @@ function materialize_scratch_env(project_path::AbstractString, package_name::Abs
     # captured before we add the package itself to it.
     source_deps = copy(deps)
 
-    develop_path = nothing
+    develop_paths = String[]
 
-    if root_name isa AbstractString && root_uuid isa AbstractString
+    if root_name isa AbstractString && root_uuid isa AbstractString && root_name != package_name
         deps[root_name] = root_uuid
         bound = _bind_package_path!(project, manifest, root_name, root_uuid, root_version, src_dir, source_deps)
-        bound || (develop_path = src_dir)
+        bound || push!(develop_paths, src_dir)
     end
 
-    # The package under test may be a *different* package that this environment
-    # devs — the shape a monorepo produces when a workspace package's tests run
-    # against the root project. Nothing to do if we cannot place it: either it is
-    # the root package we just handled, or it is a registered dependency that the
-    # manifest already resolves.
-    if package_name != "" && package_name != root_name && _SUPPORTS_SOURCES && haskey(deps, package_name)
-        package_path = _find_package_path(project, manifest, src_dir, package_name)
-        if package_path !== nothing
-            sources = get(project, "sources", nothing)
-            if !(sources isa AbstractDict)
-                sources = Dict{String,Any}()
-                project["sources"] = sources
-            end
-            sources[package_name] = Dict{String,Any}("path" => package_path)
-        end
+    if package_name != ""
+        package_path === nothing && error("Cannot locate package checkout for `$package_name`.")
+        package_project_file = _find_env_file(package_path, _PROJECT_NAMES)
+        package_project_file === nothing && error("Package checkout `$package_path` has no project file.")
+        package_project = Pkg.TOML.parsefile(package_project_file)
+        package_project_name = get(package_project, "name", nothing)
+        package_project_name == package_name || error("Package checkout `$package_path` does not define package `$package_name`.")
+        package_uuid = get(package_project, "uuid", nothing)
+        _is_uuid(package_uuid) || error("Package `$package_name` has no valid UUID.")
+        package_version = get(package_project, "version", nothing)
+        package_deps = get(package_project, "deps", nothing)
+        package_deps isa AbstractDict || (package_deps = Dict{String,Any}())
+
+        deps[package_name] = package_uuid
+        bound = _bind_package_path!(
+            project,
+            manifest,
+            package_name,
+            package_uuid,
+            package_version,
+            package_path,
+            package_deps,
+        )
+        bound || push!(develop_paths, package_path)
     end
 
     for key in _STRIPPED_PROJECT_KEYS
@@ -560,7 +567,11 @@ function materialize_scratch_env(project_path::AbstractString, package_name::Abs
 
     # That copy only covers the stretch where the scratch environment is the
     # active one. `TestEnv.activate` takes that away again, hence the carrier.
-    preferences_dir = materialize_preferences_carrier(source_preferences, preference_owners, local_preferences)
+    preferences_dir = preferences_carrier ?
+        materialize_preferences_carrier(source_preferences, preference_owners, local_preferences) : nothing
 
-    return ScratchEnv(env_dir, develop_path, preferences_dir)
+    return ScratchEnv(env_dir, develop_paths, preferences_dir)
 end
+
+materialize_scratch_env(project_path::AbstractString, package_name::AbstractString) =
+    materialize_scratch_env(project_path, package_name, package_name == "" ? nothing : project_path)

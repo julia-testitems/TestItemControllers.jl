@@ -1,0 +1,5 @@
+[deps]
+BaseOnly97 = "a1b2c3d4-0001-0002-0003-000000000302"
+
+[sources]
+BaseOnly97 = {path = "../deps/BaseOnly97"}
