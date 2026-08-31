@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The teardown that frees a test item's globals now also frees an array bound to a global declared with a type, `x::Vector{UInt8} = …`. Such a binding rejects `nothing`, so the assignment threw, was swallowed, and the array stayed reachable for the life of the test process — and test processes are pooled, so it was held across every later run on that worker too. An empty array of the same type is assigned instead. A `const` still cannot be released: from Julia 1.12 on the assignment is rejected and redeclaring with `const` frees nothing either, because the previous binding partition goes on holding the old value, so a test item that binds a large object should use a plain global. Ported from julia-testitems/TestItemRunner.jl#145.
 - `Logging` is now declared in the test target. `test/test_worker_lifecycle.jl` does `using Logging`, so `Pkg.test()` always ended in `ArgumentError: Package Logging not found in current path` — meaning the test item covering the slow-activation warning had never actually run.
 
 ### Added
