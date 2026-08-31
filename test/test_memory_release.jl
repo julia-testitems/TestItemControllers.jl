@@ -5,10 +5,14 @@
     # julia-testitems/TestItemRunner.jl#65 reports.
     #
     # The fixture's first item parks a `WeakRef` to a large array in `Main` — `Main` is not
-    # a test code module, so the teardown leaves the probe itself alone — and its second
-    # item collects and looks at what the reference still points at. They have to run in
-    # this order on the same process, so they are driven as two consecutive runs rather
-    # than as one run of two items.
+    # a test code module, so the teardown leaves the probes themselves alone — and its
+    # second item collects and looks at what the references still point at. They have to
+    # run in this order on the same process, so they are driven as two consecutive runs
+    # rather than as one run of two items.
+    #
+    # There is one probe per binding form: a plain global and a type annotated one, both of
+    # which have to be released, and a `const`, which cannot be from Julia 1.12 on. The
+    # verdict on all three is the second item passing or failing.
     using TestItemControllers: TestItemController, TestRunItem, execute_testrun, shutdown, ControllerCallbacks
     import UUIDs
 
