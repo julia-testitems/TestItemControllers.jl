@@ -76,3 +76,11 @@ end
 @testitem "abort crash" begin
     ccall(:abort, Cvoid, ())
 end
+
+@testitem "unicode output ✔" begin
+    println("✔ check \"quoted\" ✓")
+    # Long enough that the controller reads it from the pipe in several chunks, so a
+    # chunk boundary falls inside a multi-byte character.
+    println("✔" ^ 100_000)
+    @test true
+end

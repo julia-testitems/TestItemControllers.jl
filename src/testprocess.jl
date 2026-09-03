@@ -79,6 +79,171 @@ function _truncate_for_log(s::AbstractString; max_bytes::Int=8192)
     return SubString(s, 1, i) * "... ($(ncodeunits(s) - i) bytes truncated)"
 end
 
+# ---------------------------------------------------------------------------
+# Output demultiplexing
+#
+# A test process shares one pipe (its stdout and stderr both point at it) between the
+# process's own output and the output of whichever test item is running. The test server
+# frames each item's output so the two can be told apart again:
+#
+#     \x1f<begin uuid><test item id>\x1f   …item output…   \x1f<end uuid>
+#
+# The framing is duplicated in `testprocess/TestItemServer/src/TestItemServer.jl`, which
+# writes it; keep the two in sync. `\x1f` (ASCII unit separator) starts both markers and
+# terminates the id — a control character that never occurs in an id or in ordinary
+# output. The id used to be terminated by `"` instead, which is common in output; with the
+# marker and the id going out as separate writes, another task's output could land in
+# between and its first `"` was taken for the end of the id (#101).
+#
+# `OutputDemuxer` parses the stream. It works on *bytes* throughout: the markers are ASCII,
+# so byte comparison is exact, and the id is cut out by byte offsets, so a multi-byte
+# character anywhere in the stream cannot produce an invalid string index — the previous
+# parser mixed `length` (characters) with byte indices and threw a `StringIndexError` on a
+# `✔` (#101), after which the process's output was never forwarded again. `feed!` never
+# throws on any byte sequence.
+#
+# A chunk read from the pipe can end anywhere: part way through a marker, through the id,
+# or through a multi-byte character. Whatever cannot be classified yet stays in the buffer
+# for the next chunk, including an incomplete trailing UTF-8 sequence, so every string
+# handed out is valid UTF-8 when the process's output is.
+
+const OUTPUT_BEGIN_MARKER = "\x1f3805a0ad41b54562a46add40be31ca27"
+const OUTPUT_END_MARKER = "\x1f4031af828c3d406ca42e25628bb0aa77"
+const OUTPUT_FRAME_BYTE = 0x1f
+
+const _OUTPUT_BEGIN_MARKER_BYTES = Vector{UInt8}(codeunits(OUTPUT_BEGIN_MARKER))
+const _OUTPUT_END_MARKER_BYTES = Vector{UInt8}(codeunits(OUTPUT_END_MARKER))
+
+mutable struct OutputDemuxer
+    # Bytes not yet handed out: a possible marker prefix, an id without its terminator
+    # yet, or an incomplete UTF-8 sequence.
+    buffer::Vector{UInt8}
+    # The item whose output frame is open, or `nothing` between frames.
+    current_testitem_id::Union{Nothing,String}
+end
+
+OutputDemuxer() = OutputDemuxer(UInt8[], nothing)
+
+# Output runs in stream order, each attributed to the test item whose frame it fell in
+# (`nothing` for the process's own output between frames).
+const OutputRuns = Vector{Pair{Union{Nothing,String},String}}
+
+# Whether `marker` occurs at `buf[i]`: `:full` if it does, `:partial` if `buf[i:n]` runs out
+# while still agreeing with it, `:none` otherwise.
+function _match_marker(buf::Vector{UInt8}, i::Int, n::Int, marker::Vector{UInt8})
+    for j in eachindex(marker)
+        k = i + j - 1
+        k > n && return :partial
+        buf[k] == marker[j] || return :none
+    end
+    return :full
+end
+
+# Length of an incomplete UTF-8 sequence at the end of `buf[lo:hi]`: a lead byte followed by
+# fewer continuation bytes than it announces. Anything else — complete sequences, ASCII,
+# stray continuation bytes, bytes that cannot start a sequence — is 0, so malformed output
+# passes through unchanged rather than being held forever.
+function _incomplete_utf8_tail(buf::Vector{UInt8}, lo::Int, hi::Int)
+    k = hi
+    while k >= lo && hi - k < 3 && (buf[k] & 0xC0) == 0x80
+        k -= 1
+    end
+    k < lo && return 0
+    lead = buf[k]
+    need = lead >= 0xF8 ? 0 :
+           lead >= 0xF0 ? 4 :
+           lead >= 0xE0 ? 3 :
+           lead >= 0xC0 ? 2 : 0
+    have = hi - k + 1
+    return need > have ? have : 0
+end
+
+function _push_run!(runs::OutputRuns, id::Union{Nothing,String}, buf::Vector{UInt8}, lo::Int, hi::Int)
+    lo > hi && return
+    text = String(buf[lo:hi])
+    if !isempty(runs) && runs[end].first == id
+        runs[end] = id => runs[end].second * text
+    else
+        push!(runs, id => text)
+    end
+    return
+end
+
+"""
+    feed!(d::OutputDemuxer, data) -> OutputRuns
+
+Consume the next chunk of a test process's output and return the output that can be
+attributed so far, in order, each run paired with the id of the test item it belongs to
+(`nothing` outside any item's frame). Bytes that might be the start of a marker, an id
+still missing its terminator, or an incomplete UTF-8 character are kept for the next call.
+"""
+function feed!(d::OutputDemuxer, data::AbstractVector{UInt8})
+    append!(d.buffer, data)
+    buf = d.buffer
+    n = length(buf)
+    runs = OutputRuns()
+
+    text_start = 1      # first byte of the text run not yet handed out
+    keep_from = n + 1   # first byte that stays in the buffer
+    i = 1
+    while i <= n
+        if buf[i] != OUTPUT_FRAME_BYTE
+            i += 1
+            continue
+        end
+
+        in_frame = d.current_testitem_id !== nothing
+        marker = in_frame ? _OUTPUT_END_MARKER_BYTES : _OUTPUT_BEGIN_MARKER_BYTES
+        m = _match_marker(buf, i, n, marker)
+        if m == :none
+            # A lone frame byte in the output: not ours, pass it through.
+            i += 1
+        elseif m == :partial
+            keep_from = i
+            break
+        elseif in_frame
+            _push_run!(runs, d.current_testitem_id, buf, text_start, i - 1)
+            d.current_testitem_id = nothing
+            i += length(marker)
+            text_start = i
+        else
+            id_start = i + length(marker)
+            id_end = findnext(==(OUTPUT_FRAME_BYTE), buf, id_start)
+            if id_end === nothing
+                keep_from = i
+                break
+            end
+            _push_run!(runs, nothing, buf, text_start, i - 1)
+            d.current_testitem_id = String(buf[id_start:id_end-1])
+            i = id_end + 1
+            text_start = i
+        end
+    end
+
+    if keep_from > n
+        # No marker in progress: hand out the trailing text, minus a character that is
+        # still arriving.
+        keep_from = n + 1 - _incomplete_utf8_tail(buf, text_start, n)
+    end
+    _push_run!(runs, d.current_testitem_id, buf, text_start, keep_from - 1)
+    deleteat!(buf, 1:keep_from-1)
+
+    return runs
+end
+
+"""
+    flush!(d::OutputDemuxer) -> OutputRuns
+
+Hand out whatever `feed!` was still holding, verbatim. For the end of the stream, where
+nothing more is coming to complete a marker or a character.
+"""
+function flush!(d::OutputDemuxer)
+    runs = OutputRuns()
+    _push_run!(runs, d.current_testitem_id, d.buffer, 1, length(d.buffer))
+    empty!(d.buffer)
+    return runs
+end
+
 # Number of interactive threads reserved in a test process. The main task — and therefore
 # the runner loop and every test item — occupies the first; the hang watchdog gets the
 # second, which is what lets it run while an item has the main thread wedged. Only the
@@ -268,116 +433,50 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
                 raw_output_lock = ReentrantLock()
 
                 @async try
-                    begin_marker = "\x1f3805a0ad41b54562a46add40be31ca27"
-                    end_marker = "\x1f4031af828c3d406ca42e25628bb0aa77"
-                    buffer = ""
-                    current_output_testitem_id = nothing
-                    while !eof(pipe_out)
-                        data = readavailable(pipe_out, token)
-                        ps.last_output_at = time()
-                        data_as_string = String(data)
-
-                        # Capture raw output for crash diagnostics
-                        lock(raw_output_lock) do
-                            push!(raw_output_chunks, data_as_string)
-                        end
-
-                        buffer *= data_as_string
-
-                        output_for_test_proc = IOBuffer()
-                        output_for_test_items = Pair{Union{Nothing,String},IOBuffer}[]
-
-                        i = 1
-                        while i<=length(buffer)
-                            might_be_begin_marker = false
-                            might_be_end_marker = false
-
-                            if current_output_testitem_id === nothing
-                                j = 1
-                                might_be_begin_marker = true
-                                while i + j - 1<=length(buffer) && j <= length(begin_marker)
-                                    if buffer[i + j - 1] != begin_marker[j] || nextind(buffer, i + j - 1) != i + j
-                                        might_be_begin_marker = false
-                                        break
-                                    end
-                                    j += 1
-                                end
-                                is_begin_marker = might_be_begin_marker && length(buffer) - i + 1 >= length(begin_marker)
-
-                                if is_begin_marker
-                                    ti_id_end_index = findfirst("\"", SubString(buffer, i))
-                                    if ti_id_end_index === nothing
-                                        break
-                                    else
-                                        current_output_testitem_id = SubString(buffer, i + length(begin_marker), i + ti_id_end_index.start - 2)
-                                        i = nextind(buffer, i + ti_id_end_index.start - 1)
-                                    end
-                                elseif might_be_begin_marker
-                                    break
-                                end
-                            else
-                                j = 1
-                                might_be_end_marker = true
-                                while i + j - 1<=length(buffer) && j <= length(end_marker)
-                                    if buffer[i + j - 1] != end_marker[j] || nextind(buffer, i + j - 1) != i + j
-                                        might_be_end_marker = false
-                                        break
-                                    end
-                                    j += 1
-                                end
-                                is_end_marker = might_be_end_marker && length(buffer) - i + 1 >= length(end_marker)
-
-                                if is_end_marker
-                                    current_output_testitem_id = nothing
-                                    i = i + length(end_marker)
-                                elseif might_be_end_marker
-                                    break
-                                end
-                            end
-
-                            if !might_be_begin_marker && !might_be_end_marker
-                                print(output_for_test_proc, buffer[i])
-
-                                if length(output_for_test_items) == 0 || output_for_test_items[end].first != current_output_testitem_id
-                                    push!(output_for_test_items, current_output_testitem_id => IOBuffer())
-                                end
-
-                                output_for_ti = output_for_test_items[end].second
-                                if !CancellationTokens.is_cancellation_requested(token)
-                                    print(output_for_ti, buffer[i])
-                                end
-
-                                i = nextind(buffer, i)
-                            end
-                        end
-
-                        buffer = buffer[i:end]
-
-                        output_for_test_proc_as_string = String(take!(output_for_test_proc))
-
-                        if length(output_for_test_proc_as_string) > 0
-                            @debug "Forwarding process output chunk" testprocess_id output=_truncate_for_log(output_for_test_proc_as_string)
+                    # Post one chunk of demultiplexed output to the reactor: the whole of it
+                    # as the process's output, and each run as its test item's.
+                    function forward_output(runs)
+                        process_output = join(run.second for run in runs)
+                        if !isempty(process_output)
+                            @debug "Forwarding process output chunk" testprocess_id output=_truncate_for_log(process_output)
                             put!(
                                 reactor_channel,
-                                TestProcessOutputMsg(testprocess_id, output_for_test_proc_as_string)
+                                TestProcessOutputMsg(testprocess_id, process_output)
                             )
                         end
 
-                        for (k,v) in output_for_test_items
-                            output_for_ti_as_string = String(take!(v))
+                        # Item output stops being attributed once the run is cancelled; the
+                        # process's own output above is still forwarded.
+                        CancellationTokens.is_cancellation_requested(token) && return
 
-                            if length(output_for_ti_as_string) > 0
-                                testrun_id = ps.testrun_id
-                                if testrun_id !== nothing
-                                    @debug "Forwarding test item output chunk" testprocess_id testitem_id=something(k, missing) output=_truncate_for_log(output_for_ti_as_string)
-                                    put!(
-                                        reactor_channel,
-                                        AppendOutputMsg(testrun_id, testprocess_id, k, replace(output_for_ti_as_string, "\n"=>"\r\n"))
-                                    )
-                                end
+                        for (k, v) in runs
+                            isempty(v) && continue
+                            testrun_id = ps.testrun_id
+                            if testrun_id !== nothing
+                                @debug "Forwarding test item output chunk" testprocess_id testitem_id=something(k, missing) output=_truncate_for_log(v)
+                                put!(
+                                    reactor_channel,
+                                    AppendOutputMsg(testrun_id, testprocess_id, k, replace(v, "\n"=>"\r\n"))
+                                )
                             end
                         end
                     end
+
+                    demux = OutputDemuxer()
+                    while !eof(pipe_out)
+                        data = readavailable(pipe_out, token)
+                        ps.last_output_at = time()
+
+                        # Capture raw output for crash diagnostics
+                        lock(raw_output_lock) do
+                            push!(raw_output_chunks, String(copy(data)))
+                        end
+
+                        forward_output(feed!(demux, data))
+                    end
+                    # The stream is over: whatever was being held back for a marker or a
+                    # character that never completed is output after all.
+                    forward_output(flush!(demux))
                 catch err
                     if err isa CancellationTokens.OperationCanceledException
                         @debug "Output reading cancelled by token" testprocess_id

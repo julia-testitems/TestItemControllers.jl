@@ -77,3 +77,35 @@
     @test occursin("hello from output test", combined_output)
     @test occursin("second line of output", combined_output)
 end
+
+@testitem "Output capture survives multi-byte characters (#101)" setup=[TestHelpers] begin
+    # A `✔` in the captured output raised a `StringIndexError` on the output-reading task,
+    # after which nothing the process printed was forwarded any more. The item's name puts
+    # one at the end of its id as well, which is where the report's crash was.
+    pkg_path = joinpath(TestHelpers.TESTDATA_DIR, "BasicPackage")
+    discovered = TestHelpers.discover_test_items(pkg_path)
+
+    items = filter(i -> i.label == "unicode output ✔", discovered.items)
+    @test length(items) == 1
+    item = only(items)
+    @test endswith(item.id, "✔")
+
+    result = TestHelpers.run_testrun(items, discovered.setups; timeout=300, TestHelpers._env_kwargs(discovered)...)
+
+    @test length(filter(e -> e.event == :passed, result.events)) == 1
+
+    # Attributed to the right item, complete, and valid UTF-8 — the 100,000-character line
+    # is read from the pipe in several chunks, so the reader had to reassemble a character
+    # split between two of them.
+    item_output = get(result.outputs, item.id, "")
+    @test isvalid(item_output)
+    @test occursin("✔ check \"quoted\" ✓", item_output)
+    @test occursin("✔"^100_000, item_output)
+
+    # None of it leaked into the process's own output (the launch and precompile chatter
+    # that precedes the first frame).
+    process_output = get(result.outputs, nothing, "")
+    @test isvalid(process_output)
+    @test !occursin("✔ check", process_output)
+    @test !occursin("✔✔", process_output)
+end

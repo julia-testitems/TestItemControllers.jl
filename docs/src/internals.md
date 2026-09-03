@@ -187,12 +187,29 @@ JSONRPC connection.
 
 ### Output demultiplexing
 
-Child processes interleave output from multiple test items on a single
-`stdout` stream. The controller uses sentinel markers
-(`\x1f3805a0ad41b54562a46add40be31ca27` and
-`\x1f4031af828c3d406ca42e25628bb0aa77`) embedded in the output to associate
-each chunk with the correct test item. The IO task in `testprocess.jl`
-parses these markers and dispatches `AppendOutputMsg` messages to the reactor.
+A child process's `stdout` and `stderr` both go to one pipe, which carries the
+process's own output as well as that of whichever test item is running. The
+test server frames each item's output so the controller can attribute it:
+
+```
+\x1f3805a0ad41b54562a46add40be31ca27<test item id>\x1f  …output…  \x1f4031af828c3d406ca42e25628bb0aa77
+```
+
+`\x1f` (ASCII unit separator) opens both markers and terminates the id. It is
+a control character that never appears in an id or in ordinary output, which a
+`"` — the previous terminator — does not guarantee. The server writes the
+whole frame header as a single string, so output from another task cannot land
+between the marker and the id.
+
+`OutputDemuxer` in `testprocess.jl` parses the stream on the IO task. It works
+on bytes rather than characters: the markers are ASCII, and cutting the id out
+by byte offset means a multi-byte character anywhere in the stream cannot
+produce an invalid string index. A chunk read from the pipe can end part way
+through a marker, an id or a multi-byte character; whatever cannot be
+classified yet is held for the next chunk, so every forwarded string is valid
+UTF-8 when the process's output is. Runs of output are dispatched to the
+reactor as `TestProcessOutputMsg` (the whole stream) and `AppendOutputMsg`
+(per test item).
 
 ## Test run lifecycle
 
