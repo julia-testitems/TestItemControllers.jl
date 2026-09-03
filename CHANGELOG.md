@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Captured output containing multi-byte characters no longer kills the output reader ([#101](https://github.com/julia-testitems/TestItemControllers.jl/issues/101)). The demultiplexer that attributes a test process's output to test items mixed character counts with byte indices, so a `✔` next to the end of a frame header raised a `StringIndexError`, after which the process's output was never forwarded again. It now works on bytes throughout, holds back a multi-byte character that a pipe read split in two so every forwarded chunk is valid UTF-8, and no longer drops the output left in its buffer when the process exits. The frame header a test process writes now ends in `\x1f` rather than `"` and goes out as a single write, so a test item name containing a double quote — or output another task writes at the same moment — no longer truncates the id.
 - `Logging` is now declared in the test target. `test/test_worker_lifecycle.jl` does `using Logging`, so `Pkg.test()` always ended in `ArgumentError: Package Logging not found in current path` — meaning the test item covering the slow-activation warning had never actually run.
 
 ### Added

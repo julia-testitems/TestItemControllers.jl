@@ -1373,7 +1373,11 @@ function runner_loop(state::TestProcessState)
                 saved_load_path = copy(LOAD_PATH)
                 saved_cwd = pwd()
 
-                print(stderr, "\x1f3805a0ad41b54562a46add40be31ca27", "$(current_testitem.id)\"", "")
+                # Opens this item's output frame; the controller's `OutputDemuxer` in
+                # `src/testprocess.jl` parses it, and the two must agree. One string, hence
+                # one write: sent as separate pieces, output another task writes in between
+                # lands inside the frame header and corrupts the id.
+                print(stderr, string("\x1f3805a0ad41b54562a46add40be31ca27", current_testitem.id, '\x1f'))
                 flush(stderr)
                 arm_watchdog!(current_testitem.id, current_testitem.timeoutMs)
                 ret = try
