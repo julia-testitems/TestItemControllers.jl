@@ -1143,6 +1143,19 @@ function get_debug_session_if_present()
 end
 
 
+# Whether `project_uri` is the `test` sub-project sitting directly inside the package folder
+# `package_uri` — i.e. `<package>/test`, the folder Pkg treats as a package's test environment.
+function is_dedicated_test_project(project_uri, package_uri)
+    (project_uri === missing || package_uri === missing || project_uri == "" || package_uri == "") && return false
+
+    strip_trailing(p) = (endswith(p, '/') || endswith(p, '\\')) ? p[1:end-1] : p
+
+    project_path = strip_trailing(normpath(uri2filepath(project_uri)))
+    package_path = strip_trailing(normpath(uri2filepath(package_uri)))
+
+    return basename(project_path) == "test" && dirname(project_path) == package_path
+end
+
 function activate_env_request(params::TestItemServerProtocol.ActivateEnvParams, state::TestProcessState, token::CancellationToken)
     try
         # A test process runs tests in an environment the host has already set up, so
@@ -1157,6 +1170,26 @@ function activate_env_request(params::TestItemServerProtocol.ActivateEnvParams, 
         # the depot still gets installed.
         if isdefined(Pkg, :UPDATED_REGISTRY_THIS_SESSION)
             Pkg.UPDATED_REGISTRY_THIS_SESSION[] = true
+        end
+
+        # A package's `test` sub-project that is a Pkg workspace member is a complete, already
+        # resolved environment: its Project.toml lists the package plus every test dependency,
+        # and its Manifest is the shared workspace Manifest that Julia locates by walking the
+        # `[workspace]` chain up from this folder. Activating it in place is the whole
+        # environment, and activation is read-only — so it keeps the promise that running
+        # tests never writes into the user's working tree.
+        #
+        # The scratch-env + `TestEnv.activate` path below cannot serve this case: it copies the
+        # project into a scratch directory, which severs the workspace relationship, then finds
+        # no Manifest beside the copy and tries to resolve one — which fails because the
+        # workspace's path-tracked packages are not registered.
+        if is_dedicated_test_project(params.projectUri, params.packageUri)
+            Pkg.activate(uri2filepath(params.projectUri))
+
+            return TestItemServerProtocol.ActivateEnvResult(
+                status = "success",
+                error = missing
+            )
         end
 
         # We never activate the user's own environment: `TestEnv.activate` runs
