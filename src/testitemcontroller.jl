@@ -419,7 +419,11 @@ end
 #     `nothing` is a deliberate choice, because an activation covers a precompilation;
 #   * `ProcessWaitingForPrecompile` — waiting on another process that is itself activating;
 #   * `ProcessRevising` — a Revise pass over changed files;
-#   * `ProcessRunning` — bounded by the test item's own timeout.
+#   * `ProcessRunning` — bounded by the test item's own timeout when the caller gave one,
+#     and otherwise deliberately unbounded, like an activation: a caller that wants a bound
+#     on an item passes `TestRunItem.timeout`, and one that does not (a UI with a cancel
+#     button, an agent that bounds its own wait) gets a silent item that runs until it
+#     finishes or the run is cancelled.
 #
 # Every remaining phase is either transient controller-side bookkeeping or `ProcessStarting`,
 # where a worker that never connects is exactly the hang this heartbeat exists to catch.
