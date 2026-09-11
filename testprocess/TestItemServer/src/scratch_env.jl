@@ -122,6 +122,56 @@ end
 _abs_path(base::AbstractString, path::AbstractString) =
     isabspath(path) ? normpath(path) : normpath(joinpath(base, path))
 
+# Paths compare the way the file system does, which on Windows means ignoring
+# case: the two URIs a request carries were built independently and can easily
+# disagree about the drive letter.
+_same_path(a::AbstractString, b::AbstractString) =
+    Sys.iswindows() ? lowercase(a) == lowercase(b) : a == b
+
+# A trailing separator would leave `basename` empty. `normpath` keeps it, so drop it
+# the way `dirname` does: `isdirpath` is what recognizes it.
+function _strip_trailing_separator(path::AbstractString)
+    normalized = normpath(path)
+    return isdirpath(normalized) ? dirname(normalized) : normalized
+end
+
+"""
+    workspace_test_project_file(project_path, package_path) -> Union{Nothing,String}
+
+The project file of `project_path` when it is the package's `test` folder *and*
+a `[workspace]` member of the package project at `package_path`; `nothing`
+otherwise.
+
+That is the one shape `Pkg.test` (Julia 1.12 and later) runs in place instead
+of in a sandbox: the member's `Project.toml` lists the package and every test
+dependency, and its manifest is the workspace's shared one, which Julia finds
+by walking the `[workspace]` chain up from the folder. Any other
+`test/Project.toml` — including one with a manifest of its own that `dev`s the
+package — is sandboxed by Pkg, and gets mirrored into a scratch environment
+here.
+
+`Base.base_project` is what Pkg itself consults for membership; before it
+exists (Julia < 1.12) there are no workspaces, so nothing qualifies.
+"""
+function workspace_test_project_file(project_path::AbstractString, package_path::AbstractString)
+    isdefined(Base, :base_project) || return nothing
+
+    project_dir = _strip_trailing_separator(abspath(project_path))
+    package_dir = _strip_trailing_separator(abspath(package_path))
+
+    basename(project_dir) == "test" || return nothing
+    _same_path(dirname(project_dir), package_dir) || return nothing
+
+    project_file = _find_env_file(project_dir, _PROJECT_NAMES)
+    project_file === nothing && return nothing
+
+    base = Base.base_project(project_file)
+    base isa AbstractString || return nothing
+    _same_path(dirname(base), package_dir) || return nothing
+
+    return project_file
+end
+
 # Manifests come in two shapes. Format 1.0 (Julia <= 1.6) is a bare mapping of
 # package name to a vector of entries; format 2.0 nests that mapping under
 # `[deps]` alongside top-level metadata such as `julia_version`.
