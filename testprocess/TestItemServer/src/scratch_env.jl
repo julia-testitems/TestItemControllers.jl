@@ -451,8 +451,10 @@ every write TestEnv performs then lands in the scratch directory or in TestEnv's
 own temporary directory, never in the user's folder.
 
 When the source environment has a manifest it is copied over (with relative
-paths made absolute), so the test environment resolves against exactly the
-versions the user has pinned. When it does not — or when the manifest is in a
+paths made absolute), so the test environment resolves against the versions the
+user has pinned — for the packages the test target actually reaches, which is
+all `TestEnv` keeps: `Pkg.Operations.sandbox_preserve` prunes the manifest to
+that target's closure. When it does not — or when the manifest is in a
 format this Julia cannot read and cannot be downgraded — there is nothing to
 preserve and TestEnv's `Pkg.instantiate` resolves one into the scratch directory.
 """
