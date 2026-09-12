@@ -1,7 +1,19 @@
+# Install every Julia version the worker processes support, via juliaup, and leave the
+# General registry in the form all of them can read.
+#
+#     julia scripts/install_julia_versions.jl              # every supported version
+#     julia scripts/install_julia_versions.jl --fallback   # those, plus the nightly fallback
+#
+# CI runs this as the `github_job_prep_script` of the reusable testitem workflow.
+
 using Pkg
 
-for minor in 0:13
-    version = "1.$minor"
+include("repo_common.jl")
+
+versions = copy(JULIA_VERSIONS)
+"--fallback" in ARGS && push!(versions, FALLBACK_JULIA)
+
+for version in versions
     println("Installing Julia $version...")
     run(ignorestatus(`juliaup add $version`))
 end
