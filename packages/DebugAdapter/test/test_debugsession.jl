@@ -111,3 +111,49 @@ end
     @test DefaultTerminationTarget.ran == true
     @test count(==("terminated"), events) == 1
 end
+
+@testitem "initialize clears file breakpoints left over from an earlier session" begin
+    import JuliaInterpreter
+
+    # The REPL-hosted debugger serves many sessions from one process, and the client only
+    # sends `setBreakpoints` for files that still have breakpoints. A file whose breakpoints
+    # were all deleted between sessions is therefore never mentioned again, so unless the
+    # adapter clears the process-global registry itself the deleted breakpoints keep firing
+    # for the rest of the REPL's life (julialang.org discourse #138981).
+    JuliaInterpreter.remove()
+
+    target = joinpath(@__DIR__, "stale_breakpoint_target.jl")
+    JuliaInterpreter.breakpoint(target, 2)
+    @test any(bp -> bp isa JuliaInterpreter.BreakpointFileLocation, JuliaInterpreter.breakpoints())
+
+    # A new session's first request, with no `setBreakpoints` following it.
+    session = DebugAdapter.DebugSession(IOBuffer())
+    DebugAdapter.initialize_request(session, DebugAdapter.InitializeRequestArguments(adapterID="julia"))
+
+    @test !any(bp -> bp isa JuliaInterpreter.BreakpointFileLocation, JuliaInterpreter.breakpoints())
+end
+
+@testitem "setBreakpoints removes previous breakpoints for a non-normalized source path" begin
+    import JuliaInterpreter
+
+    # `JuliaInterpreter.breakpoint` stores the normalized path, so the removal pass has to
+    # compare against the normalized form of `source.path` or it matches nothing and leaves
+    # the old breakpoints behind.
+    JuliaInterpreter.remove()
+
+    target = joinpath(@__DIR__, "sub", "..", "breakpoint_target.jl")
+    source = DebugAdapter.Source(path=target)
+
+    DebugAdapter.set_break_points_request(
+        DebugAdapter.DebugSession(IOBuffer()),
+        DebugAdapter.SetBreakpointsArguments(source=source, breakpoints=[DebugAdapter.SourceBreakpoint(line=2)])
+    )
+    @test count(bp -> bp isa JuliaInterpreter.BreakpointFileLocation, JuliaInterpreter.breakpoints()) == 1
+
+    # The client now reports that the file has no breakpoints left.
+    DebugAdapter.set_break_points_request(
+        DebugAdapter.DebugSession(IOBuffer()),
+        DebugAdapter.SetBreakpointsArguments(source=source, breakpoints=DebugAdapter.SourceBreakpoint[])
+    )
+    @test count(bp -> bp isa JuliaInterpreter.BreakpointFileLocation, JuliaInterpreter.breakpoints()) == 0
+end
