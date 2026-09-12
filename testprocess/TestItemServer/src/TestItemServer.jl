@@ -555,8 +555,71 @@ function _run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mod
         )
     )
 
-    working_dir = dirname(uri2filepath(params.uri))
-    cd(working_dir)
+    filepath = try
+        uri2filepath(params.uri)
+    catch err
+        bt = catch_backtrace()
+        return (
+            TestItemServerProtocol.errored_notification_type,
+            TestItemServerProtocol.ErroredParams(
+                testItemId = params.id,
+                messages = [
+                    TestItemServerProtocol.TestMessage(
+                        message = "Unable to resolve the test item path from `$(params.uri)`: $(format_error_message(err, bt))",
+                        location = TestItemServerProtocol.Location(
+                            params.uri,
+                            TestItemServerProtocol.Position(params.line, 1)
+                        ),
+                        stackTrace = backtrace_to_stackframes(bt),
+                    )
+                ],
+                duration = missing
+            )
+        )
+    end
+
+    if filepath === nothing
+        return (
+            TestItemServerProtocol.errored_notification_type,
+            TestItemServerProtocol.ErroredParams(
+                testItemId = params.id,
+                messages = [
+                    TestItemServerProtocol.TestMessage(
+                        "Unable to resolve the test item path from non-file URI `$(params.uri)`.",
+                        TestItemServerProtocol.Location(
+                            params.uri,
+                            TestItemServerProtocol.Position(params.line, 1)
+                        )
+                    )
+                ],
+                duration = missing
+            )
+        )
+    end
+
+    working_dir = dirname(filepath)
+    try
+        cd(working_dir)
+    catch err
+        bt = catch_backtrace()
+        return (
+            TestItemServerProtocol.errored_notification_type,
+            TestItemServerProtocol.ErroredParams(
+                testItemId = params.id,
+                messages = [
+                    TestItemServerProtocol.TestMessage(
+                        message = "Unable to enter test item directory `$working_dir`: $(format_error_message(err, bt))",
+                        location = TestItemServerProtocol.Location(
+                            params.uri,
+                            TestItemServerProtocol.Position(params.line, 1)
+                        ),
+                        stackTrace = backtrace_to_stackframes(bt),
+                    )
+                ],
+                duration = missing
+            )
+        )
+    end
 
     coverage_results = CoverageTools.FileCoverage[] # This will hold the results of various coverage sprints
 
@@ -740,7 +803,7 @@ function _run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mod
                     testItemId = params.id,
                     messages = [
                         TestItemServerProtocol.TestMessage(
-                            "Unable to load the `Test` package. Please ensure that `Test` is listed as a test dependency in the Project.toml for the package.",
+                            "Unable to load the `Test` package. Please ensure that `Test` is listed as a test dependency of the package — in `test/Project.toml` if the package has one, otherwise in `[extras]` and the `test` entry of `[targets]` in its Project.toml.",
                             TestItemServerProtocol.Location(
                                 params.uri,
                                 TestItemServerProtocol.Position(params.line, 1)
@@ -871,8 +934,6 @@ function _run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mod
 
         end
     end
-
-    filepath = uri2filepath(params.uri)
 
     code = string('\n'^(params.line-1), ' '^(params.column-1), params.code)
 
@@ -1435,14 +1496,13 @@ function runner_loop(state::TestProcessState)
                     run_testitem(state.endpoint, current_testitem, state.mode, state.coverage_root_uris, state)
                 finally
                     disarm_watchdog!()
+                    print(stderr, "\x1f4031af828c3d406ca42e25628bb0aa77")
+                    flush(stderr)
+                    # Restore environment state in case the previous test item mutated it
+                    Base.ACTIVE_PROJECT[] = saved_project
+                    append!(empty!(LOAD_PATH), saved_load_path)
+                    cd(saved_cwd)
                 end
-                print(stderr, "\x1f4031af828c3d406ca42e25628bb0aa77")
-                flush(stderr)
-
-                # Restore environment state in case the previous test item mutated it
-                Base.ACTIVE_PROJECT[] = saved_project
-                append!(empty!(LOAD_PATH), saved_load_path)
-                cd(saved_cwd)
 
                 JSONRPC.send(
                     state.endpoint,
