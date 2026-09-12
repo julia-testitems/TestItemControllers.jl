@@ -1245,6 +1245,57 @@ function activate_env_request(params::TestItemServerProtocol.ActivateEnvParams, 
             Pkg.UPDATED_REGISTRY_THIS_SESSION[] = true
         end
 
+        # A package's `test` sub-project that is a `[workspace]` member of the package project
+        # is the one test environment `Pkg.test` (Julia 1.12+) runs in place rather than in a
+        # sandbox: its Project.toml lists the package plus every test dependency, and its
+        # manifest is the shared workspace manifest that Julia locates by walking the
+        # `[workspace]` chain up from this folder. We mirror Pkg exactly — activate it in
+        # place, instantiate it, precompile it — and, as Pkg does, only for a workspace
+        # member: any other `<package>/test` project (say one with a manifest of its own that
+        # `dev`s the package) is sandboxed by `Pkg.test`, and stays on the scratch path below.
+        #
+        # That path cannot serve the workspace case: it copies the project into a scratch
+        # directory, which severs the workspace relationship, then finds no manifest beside
+        # the copy and tries to resolve one — which fails because the workspace's
+        # path-tracked packages are not registered.
+        #
+        # This is the one activation that makes the user's own folder the active project, and
+        # it still never writes there: `Pkg.activate` is read-only, and `Pkg.instantiate` only
+        # ever downloads into the depot as long as the manifest exists — so a workspace that
+        # has none is refused rather than resolved into the user's tree. What test code does
+        # with the active project (`Pkg.add` in a test item, say) is its own business, exactly
+        # as under `Pkg.test`.
+        project_path = params.projectUri === missing || params.projectUri == "" ? nothing : uri2filepath(params.projectUri)
+        package_path = params.packageUri == "" ? nothing : uri2filepath(params.packageUri)
+        workspace_project_file = project_path === nothing || package_path === nothing ? nothing :
+            workspace_test_project_file(project_path, package_path)
+
+        if workspace_project_file !== nothing
+            manifest_file = Base.project_file_manifest_path(workspace_project_file)
+            if manifest_file === nothing || !isfile(manifest_file)
+                error(
+                    "The test project at `$(dirname(workspace_project_file))` is a workspace member " *
+                    "without a resolved manifest. Run `Pkg.resolve()` in that workspace first — " *
+                    "running tests never writes into it."
+                )
+            end
+
+            Pkg.activate(dirname(workspace_project_file))
+            Pkg.instantiate(; allow_autoprecomp = false)
+
+            # Inside the serialized window, for the same reason as below.
+            try
+                Pkg.precompile()
+            catch err
+                @debug "Precompiling the workspace test environment failed" exception = (err, catch_backtrace())
+            end
+
+            return TestItemServerProtocol.ActivateEnvResult(
+                status = "success",
+                error = missing
+            )
+        end
+
         # We never activate the user's own environment: `TestEnv.activate` runs
         # `Pkg.instantiate` on whatever is active, which writes a `Manifest.toml`
         # into it. Mirror it into a scratch directory instead — see scratch_env.jl.

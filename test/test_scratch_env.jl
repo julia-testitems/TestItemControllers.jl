@@ -450,6 +450,190 @@ end
     @test ScratchEnvHelpers.snapshot(project_path) == project_before
 end
 
+@testitem "workspace_test_project_file recognizes only a workspace member" setup=[ScratchEnvImpl] begin
+    work = mktempdir()
+
+    member = joinpath(work, "Member")
+    mkpath(joinpath(member, "test"))
+    write(joinpath(member, "Project.toml"), """
+    name = "Member"
+    uuid = "a1b2c3d4-0001-0002-0003-000000000301"
+    version = "0.1.0"
+
+    [workspace]
+    projects = ["test"]
+    """)
+    write(joinpath(member, "test", "Project.toml"), """
+    [deps]
+    Member = "a1b2c3d4-0001-0002-0003-000000000301"
+    """)
+
+    # The same layout without `[workspace]`: a `test/Project.toml` that `Pkg.test`
+    # sandboxes, and that therefore has to stay on the scratch path.
+    plain = joinpath(work, "Plain")
+    mkpath(joinpath(plain, "test"))
+    write(joinpath(plain, "Project.toml"), """
+    name = "Plain"
+    uuid = "a1b2c3d4-0001-0002-0003-000000000302"
+    version = "0.1.0"
+    """)
+    write(joinpath(plain, "test", "Project.toml"), """
+    [deps]
+    Plain = "a1b2c3d4-0001-0002-0003-000000000302"
+    """)
+
+    # Workspaces arrived with Julia 1.12; before that nothing qualifies.
+    expected = isdefined(Base, :base_project) ? joinpath(member, "test", "Project.toml") : nothing
+    same(a, b) = a === nothing || b === nothing ? a === b : Base.Filesystem.samefile(a, b)
+
+    @test same(ScratchEnvImpl.workspace_test_project_file(joinpath(member, "test"), member), expected)
+    # Trailing separators do not change the answer, and neither does letter case where
+    # the file system ignores it — the two URIs of a request are built independently.
+    # (The folder has to be called `test`, exactly as Pkg spells it.)
+    @test same(ScratchEnvImpl.workspace_test_project_file(joinpath(member, "test", ""), joinpath(member, "")), expected)
+    if Sys.iswindows()
+        @test same(ScratchEnvImpl.workspace_test_project_file(joinpath(lowercase(member), "test"), uppercase(member)), expected)
+    end
+
+    @test ScratchEnvImpl.workspace_test_project_file(joinpath(plain, "test"), plain) === nothing
+    @test ScratchEnvImpl.workspace_test_project_file(member, member) === nothing
+    @test ScratchEnvImpl.workspace_test_project_file(joinpath(member, "test"), plain) === nothing
+    @test ScratchEnvImpl.workspace_test_project_file(joinpath(member, "src"), member) === nothing
+    @test ScratchEnvImpl.workspace_test_project_file(joinpath(work, "test"), member) === nothing
+end
+
+@testitem "A workspace test project is activated in place, like Pkg.test does" setup=[TestHelpers, ScratchEnvHelpers] begin
+    if !isdefined(Base, :base_project)
+        @test_skip "Pkg workspaces require Julia 1.12+"
+    else
+        using TestItemControllers: filepath2uri
+
+        # The shape from the PR: `test/` is a workspace member whose Project.toml lists the
+        # package and its test dependencies, one of which is an unregistered path-tracked
+        # package. The only manifest is the workspace's shared one in the package folder,
+        # which is what the scratch-env path could never find.
+        work = mktempdir()
+        pkg_path = joinpath(work, "Ws")
+        test_dir = joinpath(pkg_path, "test")
+        mkpath(joinpath(pkg_path, "src"))
+        mkpath(test_dir)
+        mkpath(joinpath(pkg_path, "deps", "Unregistered", "src"))
+
+        write(joinpath(pkg_path, "Project.toml"), """
+        name = "Ws"
+        uuid = "a1b2c3d4-0001-0002-0003-000000000311"
+        version = "0.1.0"
+
+        [workspace]
+        projects = ["test"]
+        """)
+        write(joinpath(pkg_path, "src", "Ws.jl"), """
+        module Ws
+        greet() = "hello from Ws"
+        end
+        """)
+        write(joinpath(pkg_path, "deps", "Unregistered", "Project.toml"), """
+        name = "Unregistered"
+        uuid = "a1b2c3d4-0001-0002-0003-000000000312"
+        version = "0.1.0"
+        """)
+        write(joinpath(pkg_path, "deps", "Unregistered", "src", "Unregistered.jl"), """
+        module Unregistered
+        origin() = :workspace
+        end
+        """)
+        write(joinpath(test_dir, "Project.toml"), """
+        [deps]
+        Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+        Unregistered = "a1b2c3d4-0001-0002-0003-000000000312"
+        Ws = "a1b2c3d4-0001-0002-0003-000000000311"
+
+        [sources]
+        Unregistered = {path = "../deps/Unregistered"}
+        """)
+        write(joinpath(test_dir, "tests.jl"), """
+        @testitem "the workspace test project is active" begin
+            using Ws, Unregistered
+            @test Ws.greet() == "hello from Ws"
+            @test Unregistered.origin() == :workspace
+            # `samefile` rather than `==`: the path round-trips through a file URI, which
+            # lower-cases the Windows drive letter.
+            @test Base.Filesystem.samefile(dirname(Base.active_project()), raw"$(test_dir)")
+        end
+        """)
+
+        # Resolve the workspace the way a user would, so the run itself has nothing to write.
+        run(`$(Base.julia_cmd()) --startup-file=no --project=$test_dir -e "import Pkg; Pkg.UPDATED_REGISTRY_THIS_SESSION[] = true; Pkg.resolve()"`)
+        @test isfile(joinpath(pkg_path, "Manifest.toml"))
+        @test !isfile(joinpath(test_dir, "Manifest.toml"))
+
+        before = ScratchEnvHelpers.snapshot(pkg_path)
+
+        discovered = TestHelpers.discover_test_items(pkg_path)
+        @test length(discovered.items) == 1
+
+        result = TestHelpers.run_testrun(
+            discovered.items,
+            discovered.setups;
+            package_name="Ws",
+            package_uri=filepath2uri(pkg_path),
+            project_uri=filepath2uri(test_dir)
+        )
+
+        @test length(ScratchEnvHelpers.passed_ids(result)) == 1
+        @test isempty(ScratchEnvHelpers.error_messages(result))
+        @test ScratchEnvHelpers.snapshot(pkg_path) == before
+    end
+end
+
+@testitem "A test project with a manifest of its own is still sandboxed" setup=[TestHelpers, ScratchEnvHelpers] begin
+    using TestItemControllers: filepath2uri
+
+    # `<package>/test` with its own Project.toml and Manifest.toml that `dev`s the
+    # package. Not a workspace member, so `Pkg.test` sandboxes it — and so do we: the
+    # environment the test items run in must not be the user's folder.
+    work = mktempdir()
+    pkg_path = ScratchEnvHelpers.materialize_package(
+        joinpath(work, "Pinned");
+        name="Pinned",
+        uuid="a1b2c3d4-0001-0002-0003-000000000321"
+    )
+    test_dir = joinpath(pkg_path, "test")
+
+    write(joinpath(test_dir, "Project.toml"), """
+    [deps]
+    Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+    """)
+    run(`$(Base.julia_cmd()) --startup-file=no --project=$test_dir -e "import Pkg; isdefined(Pkg, :UPDATED_REGISTRY_THIS_SESSION) && (Pkg.UPDATED_REGISTRY_THIS_SESSION[] = true); Pkg.develop(Pkg.PackageSpec(path=ARGS[1]))" $pkg_path`)
+    @test isfile(joinpath(test_dir, "Manifest.toml"))
+
+    write(joinpath(test_dir, "tests.jl"), """
+    @testitem "the active project is a scratch copy" begin
+        using Pinned
+        @test Pinned.greet() == "hello from Pinned"
+        @test !Base.Filesystem.samefile(dirname(Base.active_project()), raw"$(test_dir)")
+        @test !Base.Filesystem.samefile(dirname(Base.active_project()), raw"$(pkg_path)")
+    end
+    """)
+
+    before = ScratchEnvHelpers.snapshot(pkg_path)
+
+    discovered = TestHelpers.discover_test_items(pkg_path)
+    @test length(discovered.items) == 1
+
+    result = TestHelpers.run_testrun(
+        discovered.items,
+        discovered.setups;
+        package_name="Pinned",
+        package_uri=filepath2uri(pkg_path),
+        project_uri=filepath2uri(test_dir)
+    )
+
+    @test length(ScratchEnvHelpers.passed_ids(result)) == 1
+    @test isempty(ScratchEnvHelpers.error_messages(result))
+    @test ScratchEnvHelpers.snapshot(pkg_path) == before
+end
+
 @testitem "Test items run against a copy of the environment, not the original" setup=[TestHelpers, ScratchEnvHelpers] begin
     work = mktempdir()
     pkg_path = ScratchEnvHelpers.materialize_package(
