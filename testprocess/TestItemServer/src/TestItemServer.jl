@@ -41,6 +41,7 @@ end
 
 include("helper.jl")
 include("scratch_env.jl")
+include("cpu_target_precompile.jl")
 include("watchdog.jl")
 
 # Exit code the test process uses when it stops itself between test items because system
@@ -1229,6 +1230,22 @@ function get_debug_session_if_present()
 end
 
 
+# `nothing` when precompiling in this process is fine, otherwise the `-C` base target
+# the precompile has to run under -- see cpu_target_precompile.jl. Read per request,
+# never at load time: the package image would bake the value in.
+function _portable_precompile_target()
+    target = get(ENV, "JULIA_CPU_TARGET", nothing)
+    portable_precompile_applies(target) || return nothing
+    return cpu_target_base_variant(target)
+end
+
+function _precompile_active_project(base::AbstractString, token::CancellationToken)
+    status = run_portable_precompile(base, Base.active_project();
+        cancelled = () -> CancellationTokens.is_cancellation_requested(token))
+    status === :cancelled && error("Environment activation was cancelled while precompiling the test environment")
+    return status
+end
+
 function activate_env_request(params::TestItemServerProtocol.ActivateEnvParams, state::TestProcessState, token::CancellationToken)
     try
         # A test process runs tests in an environment the host has already set up, so
@@ -1283,11 +1300,18 @@ function activate_env_request(params::TestItemServerProtocol.ActivateEnvParams, 
             Pkg.activate(dirname(workspace_project_file))
             Pkg.instantiate(; allow_autoprecomp = false)
 
-            # Inside the serialized window, for the same reason as below.
-            try
-                Pkg.precompile()
-            catch err
-                @debug "Precompiling the workspace test environment failed" exception = (err, catch_backtrace())
+            # Inside the serialized window, for the same reason as below. Under a portable
+            # `JULIA_CPU_TARGET` the precompile has to run in a `-C <base>` child -- see
+            # cpu_target_precompile.jl.
+            portable_base = _portable_precompile_target()
+            if portable_base !== nothing
+                _precompile_active_project(portable_base, token)
+            else
+                try
+                    Pkg.precompile()
+                catch err
+                    @debug "Precompiling the workspace test environment failed" exception = (err, catch_backtrace())
+                end
             end
 
             return TestItemServerProtocol.ActivateEnvResult(
@@ -1322,7 +1346,19 @@ function activate_env_request(params::TestItemServerProtocol.ActivateEnvParams, 
         end
 
         if params.packageName!=""
-            TestEnv.activate(params.packageName)
+            portable_base = _portable_precompile_target()
+            if portable_base !== nothing
+                # `TestEnv.activate` ends with `Pkg._auto_precompile`, which Pkg's
+                # `should_autoprecompile()` skips when this variable is set. The child
+                # below does that work under the portable target instead; `withenv`
+                # restores the variable before the child is spawned.
+                withenv("JULIA_PKG_PRECOMPILE_AUTO" => "0") do
+                    TestEnv.activate(params.packageName)
+                end
+                _precompile_active_project(portable_base, token)
+            else
+                TestEnv.activate(params.packageName)
+            end
         end
 
         # The controller serializes this request: one test process is nominated to activate
