@@ -270,6 +270,22 @@ The controller serializes this request across processes — one is nominated to
 activate while the others wait — so that the test environment's precompile caches
 are built exactly once. See `_activate_env!` in `testitemcontroller.jl`.
 
+When `JULIA_CPU_TARGET` names a portable, possibly multi-versioned target (a CI job
+restoring a depot built with `generic;sandybridge,...;haswell,...`, say), the
+precompile does not run in the test process itself. That variable never changes
+the process it is set in — Julia reads it only when spawning precompilation
+workers — so the native test process would accept native images already in the
+depot, compile only the stale packages, and hand them to workers running under the
+portable target, which reject those native images (Julia 1.13 workers run with
+`--compiled-modules=strict` and fail; older ones recompile everything nested).
+Instead `TestEnv.activate` runs with `JULIA_PKG_PRECOMPILE_AUTO=0`, and
+`Pkg.precompile()` runs in a child Julia started with `-C <base variant>` (`generic`
+for the target above), the same expanded load path and the same cache-affecting
+flags; that child rebuilds the caches under the portable target and the test
+process then loads them. `testprocess/TestItemServer/src/cpu_target_precompile.jl`
+holds the target parser and the predicate; the child is used only on Julia 1.10+
+with compiled modules and package images on.
+
 ### Cancellation and timeouts
 
 - Each test run has a `CancellationTokenSource`. If the caller's token fires,
