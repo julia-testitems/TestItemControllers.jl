@@ -13,9 +13,17 @@ include("repo_common.jl")
 versions = copy(JULIA_VERSIONS)
 "--fallback" in ARGS && push!(versions, FALLBACK_JULIA)
 
+# On a 32-bit (i686) Julia -- CI's x86 legs run this script on the leg's own channel --
+# install the `~x86` channels: a bare channel resolves to the OS's native x64 build,
+# which is not the architecture those legs' per-version test items should run (see
+# `TestHelpers.juliaup_channel`). The nightly fallback has no `~x86` build and stays bare.
+channel_for(version) =
+    (Sys.ARCH === :i686 && version != FALLBACK_JULIA) ? "$(version)~x86" : version
+
 for version in versions
-    println("Installing Julia $version...")
-    run(ignorestatus(`juliaup add $version`))
+    channel = channel_for(version)
+    println("Installing Julia $channel...")
+    run(ignorestatus(`juliaup add $channel`))
 end
 
 # Every version installed above shares this depot, and Julia 1.7's bundled 7z cannot
