@@ -39,6 +39,22 @@
         end
     end
 
+    """
+        juliaup_channel(version)
+
+    The juliaup channel for `version`, matched to this process's architecture. A bare
+    channel like `1.9` resolves to the OS's native (x64) build even when this suite is
+    running on a 32-bit Julia, and CI hands the test processes a `JULIA_CPU_TARGET`
+    chosen for the *leg's* architecture -- `pentium4` on the 32-bit legs. Julia 1.9
+    forwards that value as `-C` to its precompilation workers, and an x86-64 Julia 1.9
+    started with `-C pentium4` dies at startup ("Your CPU does not support the CX16
+    instruction"). The architecture-matched binary keeps the inherited target valid --
+    it is the base target the official i686 builds use themselves -- and makes a 32-bit
+    leg actually exercise a 32-bit stack.
+    """
+    juliaup_channel(version::AbstractString) =
+        Sys.ARCH === :i686 ? "$(version)~x86" : String(version)
+
     const _DEPOT_ENVS = Dict{String,Dict{String,Union{String,Nothing}}}()
 
     """
@@ -69,15 +85,18 @@
     "append the defaults" syntax does not exist before Julia 1.10.
     """
     function isolated_depot_env(version::AbstractString)
+        channel = juliaup_channel(version)
         lock(_HELPER_LOCK) do
-            get!(_DEPOT_ENVS, version) do
+            get!(_DEPOT_ENVS, channel) do
                 root = get(ENV, "TIC_TEST_DEPOT_ROOT", joinpath(tempdir(), "TestItemControllers-test-depots"))
-                private = joinpath(root, "v$(version)")
+                # Keyed by channel, not version: a 32-bit and a 64-bit run of the same
+                # version must not share precompile caches.
+                private = joinpath(root, "v$(channel)")
                 mkpath(private)
 
                 sep = Sys.iswindows() ? ";" : ":"
                 code = "print(join(DEPOT_PATH, Sys.iswindows() ? \";\" : \":\"))"
-                defaults = readchomp(`julia +$version --startup-file=no --history-file=no -e $code`)
+                defaults = readchomp(`julia +$channel --startup-file=no --history-file=no -e $code`)
 
                 Dict{String,Union{String,Nothing}}(
                     "JULIA_DEPOT_PATH" => isempty(defaults) ? private : string(private, sep, defaults)
@@ -129,8 +148,9 @@
         # 1.4 does not run on macOS.
         Sys.isapple() && version == "1.4" && return
 
-        version in installed_juliaup_channels() ||
-            error("Julia $version is not installed. Install it with: juliaup add $version")
+        channel = juliaup_channel(version)
+        channel in installed_juliaup_channels() ||
+            error("Julia $channel is not installed. Install it with: juliaup add $channel")
 
         discovered = basic_package_discovery()
 
@@ -141,7 +161,7 @@
         result = run_testrun(
             items, discovered.setups, discovered;
             julia_cmd="julia",
-            julia_args=["+$version"],
+            julia_args=["+$channel"],
             timeout=PLATFORM_RUN_TIMEOUT,
             env=isolated_depot_env(version)
         )

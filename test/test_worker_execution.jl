@@ -142,7 +142,8 @@ end
         Set{String}()
     end
 
-    if "1.6" in installed
+    channel = TestHelpers.juliaup_channel("1.6")
+    if channel in installed
         pkg_path = joinpath(TestHelpers.TESTDATA_DIR, "BasicPackage")
         discovered = TestHelpers.discover_test_items(pkg_path)
         items = filter(i -> i.label == "add works", discovered.items)
@@ -150,7 +151,7 @@ end
         # Deliberately left on the default depot: the "Julia 1.6 platform" item in
         # test_julia_versions.jl writes to a private layered depot instead, so the two never
         # contend on the same `compiled/v1.6` cache files even when CI runs them side by side.
-        result = TestHelpers.run_testrun(items, discovered.setups, discovered; julia_cmd="julia", julia_args=["+1.6"],
+        result = TestHelpers.run_testrun(items, discovered.setups, discovered; julia_cmd="julia", julia_args=["+$channel"],
             # Same reason as `check_julia_version`: launching an old Julia into a cold depot
             # is unbounded on the 32-bit Windows runner.
             timeout=1800)
@@ -166,7 +167,7 @@ end
         @test perf.elapsed !== nothing
         @test perf.bytes !== nothing
     else
-        @info "Skipping the old-Julia perf degradation check: juliaup channel 1.6 is not installed."
+        @info "Skipping the old-Julia perf degradation check: juliaup channel $channel is not installed."
         @test true
     end
 end
