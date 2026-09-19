@@ -35,6 +35,12 @@
     # out rather than reported as a line nobody ran.
     @test !occursin("number=\"1\"", xml)
     @test !occursin("number=\"4\"", xml)
+
+    # Epoch milliseconds overflow an `Int32`, so on a 32-bit Julia a `round(Int, ...)`
+    # here throws an InexactError and no report gets written at all.
+    stamp = match(r"timestamp=\"(\d+)\"", xml)
+    @test stamp !== nothing
+    @test parse(Int64, stamp[1]) > typemax(Int32)
 end
 
 @testitem "Cobertura export escapes and skips what it cannot report" begin

@@ -100,8 +100,10 @@ function _write_cobertura(io::IO, files::Vector{Tuple{String,Vector{Tuple{Int,In
         total_valid += valid
     end
 
-    # Cobertura timestamps are milliseconds since the epoch.
-    timestamp = round(Int, time() * 1000)
+    # Cobertura timestamps are milliseconds since the epoch. `Int64` explicitly, not
+    # `Int`: on a 32-bit Julia that is `Int32`, and epoch milliseconds passed what an
+    # `Int32` can hold in 1970.
+    timestamp = round(Int64, time() * 1000)
 
     println(io, "<?xml version=\"1.0\" encoding=\"UTF-8\"?>")
     println(io, "<!DOCTYPE coverage SYSTEM \"http://cobertura.sourceforge.net/xml/coverage-04.dtd\">")
