@@ -19,6 +19,7 @@ JuliaWorkspaces = "e554591c-7f10-434f-9f27-2097f62a04fd"
 Logging = "56ddb016-857b-54e1-b83d-db4d58db5568"
 
 [compat]
+Dates = "1.11"
 Mmap = "1.11"
 Sockets = "1.11"
 julia = "1.12"
