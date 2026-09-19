@@ -1,0 +1,2 @@
+This file exists only in test/nested, so a test item that resolves `@__DIR__` to the
+directory of the `@testmodule` it uses (test/) cannot find it.

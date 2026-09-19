@@ -745,7 +745,13 @@ function _run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mod
 
             code = string('\n'^(setup_details.line-1), ' '^(setup_details.column-1), setup_details.code)
 
-            filepath = uri2filepath(setup_details.uri)
+            # A local of its own, never `filepath`: the test item's body is evaluated under
+            # `filepath` further down, and assigning the setup's path to it made the item's
+            # `@__DIR__` and `@__FILE__` name the setup's file. This branch runs only for the
+            # *first* item to evaluate a given `@testmodule` on this process, so every later
+            # item reusing the module was unaffected — which is what made the bug look
+            # order-dependent.
+            testmodule_filepath = uri2filepath(setup_details.uri)
 
             captured_output = Ref("")
             t0 = time_ns()
@@ -756,9 +762,9 @@ function _run_testitem(endpoint, params::TestItemServerProtocol.RunTestItem, mod
                 mode == "Coverage" && clear_coverage_data()
                 try
                     with_captured_output(captured_output) do
-                        withpath(filepath) do
+                        withpath(testmodule_filepath) do
                             Logging.with_logger(Logging.ConsoleLogger(stderr, state.log_level)) do
-                                Base.invokelatest(include_string, mod, code, filepath)
+                                Base.invokelatest(include_string, mod, code, testmodule_filepath)
                             end
                         end
                     end
