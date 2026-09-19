@@ -27,7 +27,7 @@ export execute_testrun
 export TestrunResult, TestrunResultTestitem, TestrunResultTestitemProfile,
     TestrunResultMessage, TestrunResultStackFrame, TestrunResultDefinitionError,
     TestrunResultPerfStats, TestrunResultFileCoverage
-export write_junit_xml, write_lcov
+export write_junit_xml, write_lcov, write_cobertura
 
 include("json_protocol.jl")
 include("../shared/testserver_protocol.jl")
@@ -40,6 +40,7 @@ include("results.jl")
 using .Results
 include("junit.jl")
 include("lcov.jl")
+include("cobertura.jl")
 include("testenvironment.jl")
 
 include("fsm.jl")
