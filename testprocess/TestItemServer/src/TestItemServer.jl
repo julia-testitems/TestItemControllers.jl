@@ -74,8 +74,8 @@ mutable struct TestProcessState
     coverage_root_uris::Union{Nothing,Vector{String}}
     log_level::Base.CoreLogging.LogLevel
 
-    # Run a full `GC.gc()` after every test item. Defaulted by the controller, which turns
-    # it on whenever a run has more than one test process.
+    # Run a full `GC.gc()` after every test item. Opt-in: the controller leaves it off
+    # unless the caller asks for it.
     gc_between_testitems::Bool
     # Fraction of system memory (0..1) above which we stop after the current item so the
     # controller can recycle us. `nothing` disables the check.

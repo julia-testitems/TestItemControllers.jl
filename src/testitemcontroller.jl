@@ -3208,12 +3208,12 @@ function execute_testrun(
         proc_count_by_env[k] = n_procs
     end
 
-    # Collecting between items only pays for itself when memory is contended, which in
-    # practice means more than one test process — so that is the default, matching
-    # ReTestItems' `gc_between_testitems`.
-    tr.gc_between_testitems = gc_between_testitems === nothing ?
-        sum(values(proc_count_by_env), init=0) > 1 :
-        gc_between_testitems
+    # Collecting between items is opt-in. A full collection after every item made the test
+    # phase slower in most CI runs we measured, did not lower process RSS (what grows is live
+    # compiled code and caches, which no collection frees), and under memory pressure each
+    # collection can take tens of seconds. It helps a suite whose items hold memory outside
+    # the Julia heap that only a finalizer releases: C buffers, mmaps, handles, processes.
+    tr.gc_between_testitems = something(gc_between_testitems, false)
 
     # Resolve log_level from the first work unit
     log_level = !isempty(work_units) ? first(work_units).log_level : :Info

@@ -125,7 +125,7 @@ mutable struct TestRunState
     reported_items::Set{String}         # testitem_ids for which a terminal callback was emitted
     # Worker lifecycle policy for this run, sent on to each process in ConfigureTestRun.
     # `gc_between_testitems` is resolved from the caller's request in `execute_testrun`
-    # (default: on whenever the run uses more than one process).
+    # (default: off).
     gc_between_testitems::Bool
     memory_threshold::Union{Nothing,Float64}
     # Stop the run at the first failing or errored work unit. Decided on the reactor rather
