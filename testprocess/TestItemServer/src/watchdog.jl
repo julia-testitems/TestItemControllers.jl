@@ -6,8 +6,8 @@
 #
 #   * The watchdog must not depend on libuv. When a test item wedges the main thread no
 #     thread services the event loop any more, so `sleep`, `Timer` and socket writes never
-#     complete. The watchdog therefore paces itself with `Libc.systemsleep` (a plain OS
-#     sleep) and writes to a file through `IOStream`, which is a blocking `write(2)` and
+#     complete. The watchdog therefore paces itself with a plain OS sleep (see
+#     `_watchdog_sleep`) and writes to a file through `IOStream`, which is a blocking `write(2)` and
 #     needs no running loop.
 #   * The watchdog must not share a thread with the test item. The launch reserves two
 #     interactive threads on Julia >= 1.9 (see `src/testprocess.jl`): the main task — and
@@ -229,16 +229,47 @@ function _write_dump(testitem_id::AbstractString, timeout_ms::Float64)
     return nothing
 end
 
+# The watchdog's poll sleep. `Libc.systemsleep` is a plain `ccall`, so the thread stays
+# GC-unsafe for the whole sleep and every stop-the-world collection in the process has to
+# wait for it to wake up: measured at 25–50 ms per GC on Windows and 50–190 ms on macOS CI
+# runners, none of it counted in the GC time reported for an item. From Julia 1.12 on,
+# `@ccall gc_safe=true` sleeps in a GC-safe region instead, so a collection proceeds without
+# waiting. The sleep must not call back into Julia, and neither of these does.
+#
+# `@ccall` always uses the C calling convention and cannot express `stdcall`, which is what
+# `Libc.systemsleep` passes to Win32 `Sleep`; on 32-bit Windows calling `Sleep` as cdecl would
+# corrupt the stack. So Windows calls libuv's `uv_sleep` instead — a cdecl function exported
+# by the Julia runtime whose Windows implementation is exactly `Sleep(msec)`. It is a plain
+# utility, not an event loop operation, so it keeps the watchdog independent of libuv's loop.
+@static if VERSION >= v"1.12"
+    @static if Sys.iswindows()
+        function _watchdog_sleep(seconds::Real)
+            @ccall gc_safe=true uv_sleep(round(Cuint, seconds * 1e3)::Cuint)::Cvoid
+            return nothing
+        end
+    else
+        function _watchdog_sleep(seconds::Real)
+            @ccall gc_safe=true usleep(round(Cuint, seconds * 1e6)::Cuint)::Cint
+            return nothing
+        end
+    end
+else
+    _watchdog_sleep(seconds::Real) = (Libc.systemsleep(seconds); nothing)
+end
+
 function _watchdog_loop()
     while !WATCHDOG_STOP[]
-        Libc.systemsleep(WATCHDOG_POLL_SECONDS)
+        _watchdog_sleep(WATCHDOG_POLL_SECONDS)
 
-        # Mandatory. This loop neither allocates nor yields, and `Libc.systemsleep` is a
-        # plain `ccall`, so without an explicit safepoint the thread never becomes
-        # collectable — and `GC.gc(true)` between test items, which stops the world, blocks
-        # here forever. Verified: removing this deadlocks the test process on its first
-        # inter-item collection, which is why the watchdog cannot use a yield-free loop
-        # without one.
+        # Mandatory. This loop neither allocates nor yields, so without an explicit
+        # safepoint the thread never becomes collectable while it is awake — and before
+        # Julia 1.12 `_watchdog_sleep` is a plain, GC-unsafe `ccall`, so it never does at
+        # all: `GC.gc(true)` between test items, which stops the world, blocks here forever.
+        # Verified: removing this deadlocks the test process on its first inter-item
+        # collection, which is why the watchdog cannot use a yield-free loop without one.
+        # From 1.12 on the sleep itself is GC-safe, so a collection no longer waits for the
+        # thread to wake; the safepoint stays because older Julia still depends on it, and
+        # on newer Julia it costs nothing.
         GC.safepoint()
 
         deadline = WATCHDOG_DEADLINE[]
