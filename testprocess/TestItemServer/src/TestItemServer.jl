@@ -44,9 +44,10 @@ include("scratch_env.jl")
 include("cpu_target_precompile.jl")
 include("error_location.jl")
 include("watchdog.jl")
+include("process_memory.jl")
 
-# Exit code the test process uses when it stops itself between test items because system
-# memory crossed `memoryThreshold`. The controller recognises it and redistributes the
+# Exit code the test process uses when it stops itself between test items because its
+# resident memory crossed `memoryThreshold`. The controller recognises it and redistributes the
 # process's un-started items instead of reporting a crash — see `_handle_termination_during_run!`.
 const MEMORY_RECYCLE_EXIT_CODE = 66
 
@@ -77,8 +78,9 @@ mutable struct TestProcessState
     # Run a full `GC.gc()` after every test item. Defaulted by the controller, which turns
     # it on whenever a run has more than one test process.
     gc_between_testitems::Bool
-    # Fraction of system memory (0..1) above which we stop after the current item so the
-    # controller can recycle us. `nothing` disables the check.
+    # Fraction of total system memory (0..1) that this process's resident memory may reach
+    # before we stop after the current item so the controller can recycle us. `nothing`
+    # disables the check.
     memory_threshold::Union{Nothing,Float64}
 
     testitems_channel::Channel{Vector{TestItemServerProtocol.RunTestItem}}
@@ -1434,15 +1436,17 @@ JSONRPC.@message_dispatcher dispatch_msg begin
     TestItemServerProtocol.testserver_shutdown_request_type => shutdown_request
 end
 
-# Fraction of system memory currently in use, or `nothing` when the OS numbers are not
-# available. Deliberately a whole-system figure rather than this process's RSS: what makes
-# recycling worth doing is total pressure on the machine, and several test processes share it.
+# Whether this process's current resident memory is above `threshold` as a fraction of
+# total system memory. This used to measure whole-system use, but macOS keeps
+# `Sys.free_memory()` near zero even when idle, so any threshold fired after every item.
 function _memory_over_threshold(threshold::Union{Nothing,Float64})
     threshold === nothing && return false
     return try
+        rss = _current_rss()
+        rss === nothing && return false
         total = Sys.total_memory()
         total == 0 && return false
-        (1 - Sys.free_memory() / total) > threshold
+        rss / total > threshold
     catch err
         false
     end
@@ -1532,7 +1536,7 @@ function runner_loop(state::TestProcessState)
                 end
 
                 if _memory_over_threshold(state.memory_threshold)
-                    @info "Stopping this test process: system memory use is above the configured threshold of $(state.memory_threshold). The controller will redistribute the remaining test items."
+                    @info "Stopping this test process: its resident memory is above the configured threshold of $(state.memory_threshold) of system memory. The controller will redistribute the remaining test items."
                     flush(stderr)
                     flush(stdout)
                     # Must precede `exit`: it tears the runtime down from this thread, and

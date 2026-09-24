@@ -87,7 +87,7 @@ end
 end
 
 @testitem "A test process over the memory threshold is recycled without losing items" setup=[TestHelpers] begin
-    # The worker checks system memory after each item and, when over threshold, exits
+    # The worker checks its resident memory after each item and, when over threshold, exits
     # cleanly with a distinguished code instead of being killed. The controller has to treat
     # that as a recycle — redistributing un-started items through the existing termination
     # path — rather than as a crash.
@@ -141,6 +141,42 @@ end
 
     @test length(filter(e -> e.event == :passed, result.events)) == 2
     @test isempty(filter(e -> e.event in (:failed, :errored), result.events))
+end
+
+# `_current_rss` lives in the test process, which the controller test suite never loads.
+# The file only needs Base, so include it directly, as test_cpu_target.jl does.
+@testmodule ProcessMemoryImpl begin
+    include(joinpath(@__DIR__, "..", "testprocess", "TestItemServer", "src", "process_memory.jl"))
+end
+
+@testitem "_current_rss reports a plausible resident size" setup=[ProcessMemoryImpl] begin
+    # CI runs this on Linux, macOS and Windows, so it exercises each of the three OS
+    # implementations. `nothing` would mean the check silently never fires on that
+    # platform. The upper bound catches reading the wrong field: the virtual size of a
+    # Julia process is far larger than physical memory on every platform.
+    rss = ProcessMemoryImpl._current_rss()
+    @test rss isa Int
+    @test 0 < rss < Sys.total_memory()
+end
+
+@testitem "A memory threshold of 1.0 never recycles the test process" setup=[TestHelpers] begin
+    # The threshold compares this process's own resident memory against total system
+    # memory, so 1.0 cannot be crossed: the counterpart of the 0.0 tests above, pinning
+    # that a set threshold does not recycle by itself.
+    pkg_path = joinpath(TestHelpers.TESTDATA_DIR, "BasicPackage")
+    discovered = TestHelpers.discover_test_items(pkg_path)
+
+    items = filter(i -> i.label in ("add works", "greet works", "output test"), discovered.items)
+    @test length(items) == 3
+
+    result = TestHelpers.run_testrun(
+        items, discovered.setups, discovered;
+        memory_threshold=1.0, max_procs=1, timeout=300,
+    )
+
+    @test length(filter(e -> e.event == :passed, result.events)) == 3
+    @test isempty(filter(e -> e.event in (:failed, :errored), result.events))
+    @test length(filter(e -> e.event == :process_created, result.process_events)) == 1
 end
 
 @testitem "Shutdown stops within its grace period when a process never reports termination" setup=[TestHelpers] begin
