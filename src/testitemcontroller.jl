@@ -3141,6 +3141,10 @@ environments use `"Coverage"` mode) or `nothing`.
 
 # Keyword arguments
 - `coverage_root_uris` — if set, only collect coverage for files under these URI prefixes.
+- `memory_threshold` — experimental. A fraction (0..1) of total system memory: once a test
+  process's own resident memory is above it, the process exits after finishing its current
+  test item and the controller hands its remaining items to other processes. `nothing` (the
+  default) disables the check.
 - `failfast` — stop the run as soon as a work unit fails or errors. The remaining work is
   reported as skipped and the run finishes normally, exactly as an outside cancellation
   would. The decision is taken on the reactor, in the same step that records the failure, so

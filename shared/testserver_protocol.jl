@@ -93,8 +93,9 @@ end
     testSetups::Union{Missing,Vector{TestsetupDetails}}
     # Run a full `GC.gc()` after each test item.
     gcBetweenTestitems::Union{Missing,Bool}
-    # Fraction of system memory (0..1) above which the test process exits cleanly after
-    # finishing an item, so the controller can recycle it.
+    # Fraction of total system memory (0..1) that the test process's own resident memory
+    # may reach; above it the process exits cleanly after finishing an item, so the
+    # controller can recycle it.
     memoryThreshold::Union{Missing,Float64}
 end
 
