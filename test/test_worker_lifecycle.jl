@@ -1,6 +1,6 @@
 @testitem "GC between test items does not deadlock the test process" setup=[TestHelpers] begin
-    # Regression test for a deadlock that shipped with the watchdog and sat on the common
-    # path: `gc_between_testitems` defaults on for multi-process runs.
+    # Regression test for a deadlock that shipped with the watchdog, at a time when
+    # `gc_between_testitems` defaulted on for multi-process runs and so sat on the common path.
     #
     # The watchdog thread runs a loop that neither allocates nor yields, paced by
     # `Libc.systemsleep` (a plain `ccall`). Without an explicit `GC.safepoint()` the thread
@@ -41,6 +41,58 @@ end
     )
 
     @test length(filter(e -> e.event == :passed, result.events)) == 1
+end
+
+@testitem "GC between test items is off by default, even for a multi-process run" setup=[TestHelpers] begin
+    # It used to default on whenever a run had more than one test process. That made CI
+    # slower and, under memory pressure, pathologically so, so it is now opt-in.
+    #
+    # No reactor and no test process: `execute_testrun` resolves the flag into the run's
+    # `TestRunState` — which `_configure_testrun!` sends on to every process — before it
+    # posts its request for processes, so the run can be inspected at that point and then
+    # released by hand. The request also confirms that the run asked for two processes.
+    using TestItemControllers: TestItemController, ControllerCallbacks, TestRunItem,
+        GetProcsForTestRunMsg, execute_testrun
+
+    pkg_path = joinpath(TestHelpers.TESTDATA_DIR, "BasicPackage")
+    discovered = TestHelpers.discover_test_items(pkg_path)
+    items = filter(i -> i.label in ("add works", "greet works"), discovered.items)
+    @test length(items) == 2
+
+    test_env = TestHelpers.make_test_environment(; TestHelpers._env_kwargs(discovered)...)
+    work_units = [TestRunItem(i.id, test_env.id, nothing, :Info) for i in items]
+
+    callbacks = ControllerCallbacks(
+        on_testitem_started = (run_id, item_id, test_env_id) -> nothing,
+        on_testitem_passed = (run_id, item_id, test_env_id, duration) -> nothing,
+        on_testitem_failed = (run_id, item_id, test_env_id, messages, duration) -> nothing,
+        on_testitem_errored = (run_id, item_id, test_env_id, messages, duration) -> nothing,
+        on_testitem_skipped = (run_id, item_id, test_env_id) -> nothing,
+        on_append_output = (run_id, item_id, test_env_id, output) -> nothing,
+        on_attach_debugger = (run_id, pipe_name) -> nothing,
+    )
+
+    # The resolved flag and the number of processes the run requested.
+    function resolve(; kwargs...)
+        controller = TestItemController(callbacks)
+        run_task = @async execute_testrun(controller, "gc-default", [test_env], items,
+            work_units, discovered.setups, 2, nothing; kwargs...)
+
+        timedwait(() -> isready(controller.reactor_channel) || istaskdone(run_task), 30)
+        istaskdone(run_task) && fetch(run_task)  # surface an error instead of hanging below
+        msg = take!(controller.reactor_channel)
+        @test msg isa GetProcsForTestRunMsg
+        tr = controller.test_runs["gc-default"]
+        resolved = (gc=tr.gc_between_testitems, n_procs=sum(values(msg.proc_count_by_env)))
+
+        put!(tr.completion_channel, nothing)
+        TestHelpers.timed_wait(run_task, 30; label="execute_testrun after manual completion")
+        return resolved
+    end
+
+    @test resolve() == (gc=false, n_procs=2)
+    # The check can see the flag when it is set, so the one above is not vacuous.
+    @test resolve(gc_between_testitems=true) == (gc=true, n_procs=2)
 end
 
 @testitem "A timed-out test item leaves hang diagnostics in its output" setup=[TestHelpers] begin
