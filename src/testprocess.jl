@@ -414,13 +414,29 @@ function start(testprocess_id, reactor_channel, ps::TestProcessState, env::Proce
             cmd_args = `$(env.juliaCmd) $(jlArgs) --startup-file=no --history-file=no --depwarn=no $coverage_arg $testserver_script $pipe_name $(debug_pipe_name) $(error_handler_file...) $(crash_reporting_pipename...)`
             @info "Launching Julia test server process" testprocess_id pipe_name
             @debug "Full launch command" testprocess_id cmd=string(cmd_args) testserver_script mode=env.mode
-            jl_process = open(
-                pipeline(
-                    Cmd(cmd_args, detach=false, env=jlEnv),
-                    stdout = pipe_out,
-                    stderr = pipe_out
+            jl_process = try
+                open(
+                    pipeline(
+                        Cmd(cmd_args, detach=false, env=jlEnv),
+                        stdout = pipe_out,
+                        stderr = pipe_out
+                    )
                 )
-            )
+            catch err
+                err isa Base.IOError || rethrow()
+                # A `juliaCmd` that cannot be run is the user's configuration, not a fault in
+                # the controller: say why on the test items and stay up. An `@error` here
+                # would take the whole controller down under the crash-reporting logger. The
+                # reason is built from the error code because `err.msg` embeds the entire
+                # environment of the command.
+                reason = "`$(env.juliaCmd)`: $(Base.struverror(err.code)) ($(Base.uverrorname(err.code)))"
+                if occursin(' ', env.juliaCmd) && !isfile(env.juliaCmd)
+                    reason *= ". `juliaCmd` is run as a single program; pass arguments such as `+1.12` in `juliaArgs`"
+                end
+                @warn "Could not start Julia test process" testprocess_id reason
+                put!(reactor_channel, TestProcessIOErrorMsg(testprocess_id, :fatal, nothing, nothing, reason))
+                return
+            end
 
             proc_kill_registration = CancellationTokens.register(token) do
                 @info "Killing test process due to cancellation" testprocess_id

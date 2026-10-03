@@ -42,6 +42,10 @@ mutable struct TestProcessState
     # Exit info captured when the OS process dies (set in _launch_julia_process! catch)
     last_exit_code::Union{Nothing,Int}
     last_term_signal::Union{Nothing,Int}
+    # Why the controller could not start this process at all (e.g. `juliaCmd` does not
+    # exist), worded for the user. Set from `TestProcessIOErrorMsg`; when present, the
+    # queued test items are errored with it instead of being told the process crashed.
+    launch_failure::Union{Nothing,String}
     # Last time anything was heard from this process, on each of its two independent
     # channels: the JSON-RPC socket that carries every result, and the stdout/stderr pipes
     # that carry captured output. Diagnostics only — nothing branches on these. They exist
@@ -84,6 +88,7 @@ function TestProcessState(id::String, env::ProcessEnv;
         Dict{Tuple{String,String},@NamedTuple{output::String, duration::Union{Nothing,Float64}}}(),  # loaded_setups
         nothing,                                        # last_exit_code
         nothing,                                        # last_term_signal
+        nothing,                                        # launch_failure
         nothing,                                        # last_message_at
         nothing,                                        # last_output_at
     )

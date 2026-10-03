@@ -185,8 +185,11 @@ struct TestProcessIOErrorMsg <: ReactorMessage
     error_type::Symbol  # :restart or :fatal
     exit_code::Union{Nothing,Int}
     term_signal::Union{Nothing,Int}
+    # Set when the process could not be started at all; see `TestProcessState.launch_failure`.
+    reason::Union{Nothing,String}
 end
-TestProcessIOErrorMsg(id::String, error_type::Symbol) = TestProcessIOErrorMsg(id, error_type, nothing, nothing)
+TestProcessIOErrorMsg(id::String, error_type::Symbol) = TestProcessIOErrorMsg(id, error_type, nothing, nothing, nothing)
+TestProcessIOErrorMsg(id::String, error_type::Symbol, exit_code, term_signal) = TestProcessIOErrorMsg(id, error_type, exit_code, term_signal, nothing)
 
 struct ActivationFailedMsg <: ReactorMessage
     testprocess_id::String

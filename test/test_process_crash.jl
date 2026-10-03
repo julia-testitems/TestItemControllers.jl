@@ -188,6 +188,127 @@ end
     @test length(terminated) == 1
 end
 
+@testitem "A Julia command that cannot be spawned errors all test items" setup=[TestHelpers] begin
+    using Logging: with_logger, Warn, Error
+    using Test: TestLogger
+
+    pkg_path = joinpath(TestHelpers.TESTDATA_DIR, "BasicPackage")
+    discovered = TestHelpers.discover_test_items(pkg_path)
+    items = filter(i -> i.label in ("add works", "greet works"), discovered.items)
+    @test length(items) == 2
+
+    julia_cmd = joinpath(pkg_path, "nonexistent", "julia")
+
+    # At shutdown, the controller waits up to 30 s for a test process that it did not
+    # remove. A `shutdown_timeout` below that makes such a process fail the test.
+    logger = TestLogger(min_level=Warn)
+    result = with_logger(logger) do
+        TestHelpers.run_testrun(items, discovered.setups, discovered; julia_cmd, max_procs=2, timeout=60, shutdown_timeout=10)
+    end
+
+    errored = filter(e -> e.event == :errored, result.events)
+    @test sort([e.testitem_id for e in errored]) == sort([i.id for i in items])
+
+    # The user is told why, not that the process crashed.
+    @test all(errored) do e
+        any(m -> occursin("Could not start the test process", m.message) && occursin("ENOENT", m.message), e.messages)
+    end
+
+    # A misconfigured `juliaCmd` is a user error. Under the crash-reporting logger VS Code
+    # installs, anything logged at `Error` ends the controller and files a crash report.
+    @test !any(r -> r.level >= Error, logger.logs)
+
+    created = [e.id for e in result.process_events if e.event == :process_created]
+    terminated = [e.id for e in result.process_events if e.event == :process_terminated]
+    @test sort(terminated) == sort(created)
+end
+
+@testitem "A Julia command with arguments in it points the user at juliaArgs" setup=[TestHelpers] begin
+    pkg_path = joinpath(TestHelpers.TESTDATA_DIR, "BasicPackage")
+    discovered = TestHelpers.discover_test_items(pkg_path)
+    items = filter(i -> i.label == "add works", discovered.items)
+    @test length(items) == 1
+
+    # The controller runs the whole string as one program, so a juliaup channel written into
+    # `juliaCmd` cannot be spawned.
+    result = TestHelpers.run_testrun(items, discovered.setups, discovered; julia_cmd="julia +1.12", timeout=60, shutdown_timeout=10)
+
+    errored = filter(e -> e.event == :errored, result.events)
+    @test length(errored) == 1
+    @test !isempty(errored) && any(errored[1].messages) do m
+        occursin("Could not start the test process", m.message) && occursin("`juliaArgs`", m.message)
+    end
+end
+
+@testitem "A Julia process that exits during startup errors its test items as crashed" setup=[TestHelpers] begin
+    pkg_path = joinpath(TestHelpers.TESTDATA_DIR, "BasicPackage")
+    discovered = TestHelpers.discover_test_items(pkg_path)
+    items = filter(i -> i.label == "add works", discovered.items)
+    @test length(items) == 1
+
+    # Julia rejects the unknown option and exits before it connects to the controller. The
+    # process was spawned, so this is a crash and not a failure to start it.
+    result = TestHelpers.run_testrun(items, discovered.setups, discovered; julia_args=["--no-such-option"], timeout=120, shutdown_timeout=10)
+
+    errored = filter(e -> e.event == :errored, result.events)
+    @test length(errored) == 1
+    @test !isempty(errored) && any(m -> occursin("Test process crashed before running test item", m.message), errored[1].messages)
+    @test !isempty(errored) && !any(m -> occursin("Could not start the test process", m.message), errored[1].messages)
+
+    created = [e.id for e in result.process_events if e.event == :process_created]
+    terminated = [e.id for e in result.process_events if e.event == :process_terminated]
+    @test sort(terminated) == sort(created)
+end
+
+@testitem "The controller runs test items again after a Julia command could not be spawned" setup=[TestHelpers] begin
+    using TestItemControllers: TestItemController, TestRunItem, execute_testrun, shutdown, ControllerCallbacks
+    import UUIDs
+
+    pkg_path = joinpath(TestHelpers.TESTDATA_DIR, "BasicPackage")
+    discovered = TestHelpers.discover_test_items(pkg_path)
+    items = filter(i -> i.label == "add works", discovered.items)
+    @test length(items) == 1
+
+    events = NamedTuple[]
+    events_lock = ReentrantLock()
+    push_event!(e) = lock(() -> push!(events, e), events_lock)
+
+    callbacks = ControllerCallbacks(
+        on_testitem_started = (run_id, item_id, test_env_id) -> nothing,
+        on_testitem_passed = (run_id, item_id, test_env_id, duration) -> push_event!((event=:passed, testrun_id=run_id)),
+        on_testitem_failed = (run_id, item_id, test_env_id, messages, duration) -> push_event!((event=:failed, testrun_id=run_id)),
+        on_testitem_errored = (run_id, item_id, test_env_id, messages, duration) -> push_event!((event=:errored, testrun_id=run_id)),
+        on_testitem_skipped = (run_id, item_id, test_env_id) -> nothing,
+        on_append_output = (run_id, item_id, test_env_id, output) -> nothing,
+        on_attach_debugger = (run_id, pipe_name) -> nothing,
+    )
+
+    controller = TestItemController(callbacks; log_level=:Debug)
+    controller_task = @async try
+        run(controller)
+    catch err
+        @error "Controller error" exception=(err, catch_backtrace())
+    end
+
+    env_kwargs = TestHelpers._env_kwargs(discovered)
+    function run_once(test_env)
+        testrun_id = string(UUIDs.uuid4())
+        work_units = [TestRunItem(item.id, test_env.id, nothing, :Debug) for item in items]
+        run_task = @async execute_testrun(controller, testrun_id, [test_env], items, work_units, discovered.setups, 1, nothing)
+        TestHelpers.timed_wait(run_task, 600; label="test run")
+        return lock(() -> [e.event for e in events if e.testrun_id == testrun_id], events_lock)
+    end
+
+    bad_env = TestHelpers.make_test_environment(; env_kwargs..., julia_cmd=joinpath(pkg_path, "nonexistent", "julia"))
+    @test run_once(bad_env) == [:errored]
+
+    good_env = TestHelpers.make_test_environment(; env_kwargs...)
+    @test run_once(good_env) == [:passed]
+
+    shutdown(controller)
+    TestHelpers.timed_wait(controller_task, 60; label="controller shutdown")
+end
+
 @testitem "The startup-crash warning only reads fields the exception has" begin
     using TestItemControllers: TestProcessCrashException
 

@@ -1651,7 +1651,12 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
         process_was_running = ps !== nothing && state(ps.fsm) in (ProcessRunning, ProcessIdle)
         if !process_was_running
             # True startup crash — process never ran any item. Error all queued items.
-            @info "Test process '$(terminated_proc_id)' crashed during startup, erroring $(length(items_to_redistribute)) queued item(s)"
+            launch_failure = ps === nothing ? nothing : ps.launch_failure
+            if launch_failure !== nothing
+                @info "Test process '$(terminated_proc_id)' could not be started ($(launch_failure)), erroring $(length(items_to_redistribute)) queued item(s)"
+            else
+                @info "Test process '$(terminated_proc_id)' crashed during startup, erroring $(length(items_to_redistribute)) queued item(s)"
+            end
             for testitem_id in items_to_redistribute
                 item = _item_for_env(tr, test_env_id, testitem_id)
                 work_key = (testitem_id, test_env_id)
@@ -1665,6 +1670,8 @@ function _handle_termination_during_run!(c::TestItemController, msg::TestProcess
                         test_env_id,
                         TestMessage[
                             TestMessage(
+                                launch_failure !== nothing ?
+                                "Could not start the test process for test item '$(item.label)': $(launch_failure)" :
                                 "Test process crashed before running test item '$(item.label)'",
                                 nothing,
                                 nothing,
@@ -2230,6 +2237,7 @@ function handle!(c::TestItemController, msg::TestProcessIOErrorMsg)
     # Store exit info on the process state so downstream handlers can access it.
     ps.last_exit_code = msg.exit_code
     ps.last_term_signal = msg.term_signal
+    msg.reason !== nothing && (ps.launch_failure = msg.reason)
 
     _kill_julia_process!(ps)
 
@@ -2622,6 +2630,12 @@ function _launch_julia_process!(c::TestItemController, ps::TestProcessState)
               c.error_handler_file, c.crash_reporting_pipename,
               julia_version, launch_token)
     catch err
+        # `start` sends no message to the reactor for an error that occurs before its own
+        # error handler (a failed spawn is reported there; this is anything else, e.g.
+        # `Sockets.listen`). Without this message, the process stays in ProcessStarting and
+        # its test run does not complete. Posted before the `@error`, which under the
+        # crash-reporting logger ends the controller.
+        try put!(c.reactor_channel, TestProcessIOErrorMsg(ps.id, :fatal)) catch end
         @error "Error in test process IO" testprocess_id=ps.id exception=(err, catch_backtrace())
     end
     push!(ps.process_tasks, t)
