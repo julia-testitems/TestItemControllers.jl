@@ -3088,6 +3088,26 @@ function _check_stealing!(c::TestItemController, tr::TestRunState, finished_proc
     return
 end
 
+# Julia reports no counts at all for a function that was never compiled, so
+# `amend_coverage_from_src!` parses the source and marks the lines of such a function as
+# missed. It has to see the counts of the whole run. In the counts of one test item, every
+# function the item did not reach looks never compiled, and marking it there also turns the
+# lines Julia does not instrument even when the function runs (the signature of a method
+# that is only ever inlined, for one) into misses that merging with the item that did run
+# it cannot undo.
+function _amend_coverage_from_src(fc::CoverageTools.FileCoverage)
+    isfile(fc.filename) || return fc.coverage
+    amended = CoverageTools.FileCoverage(fc.filename, read(fc.filename, String), copy(fc.coverage))
+    try
+        CoverageTools.amend_coverage_from_src!(amended)
+    catch err
+        # A file that no longer parses (edited during the run, say) still has its counts.
+        @warn "Could not mark the never-compiled code in '$(fc.filename)' as missed; reporting its coverage as collected" exception=(err, catch_backtrace())
+        return fc.coverage
+    end
+    return amended.coverage
+end
+
 function _check_testrun_complete!(c::TestItemController, tr::TestRunState)
     if state(tr.fsm) in (TestRunCancelled, TestRunCompleted)
         return
@@ -3102,7 +3122,7 @@ function _check_testrun_complete!(c::TestItemController, tr::TestRunState)
             coverage_results = map(CoverageTools.merge_coverage_counts(tr.coverage)) do i
                 FileCoverage(
                     filepath2uri(i.filename),
-                    i.coverage
+                    _amend_coverage_from_src(i)
                 )
             end
         end

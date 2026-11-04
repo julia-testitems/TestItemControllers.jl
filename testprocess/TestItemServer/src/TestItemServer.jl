@@ -3,7 +3,6 @@ module TestItemServer
 include("pkg_imports.jl")
 
 import .JSONRPC: @dict_readable
-import .CoverageTools: amend_coverage_from_src!
 import .CancellationTokens: CancellationToken
 import Test, Pkg, Sockets
 import Logging
@@ -292,12 +291,10 @@ function process_coverage_data(coverage_results)
 
     coverage_info = TestItemServerProtocol.FileCoverage[]
 
+    # Raw counts: the controller marks never-compiled functions as missed once the counts
+    # of every test item are merged (see `_amend_coverage_from_src` there).
     for i in merged_coverage
-        file_cov = CoverageTools.FileCoverage(i.filename, read(i.filename, String), i.coverage)
-
-        amend_coverage_from_src!(file_cov)
-
-        push!(coverage_info, TestItemServerProtocol.FileCoverage(filepath2uri(file_cov.filename), file_cov.coverage))
+        push!(coverage_info, TestItemServerProtocol.FileCoverage(filepath2uri(i.filename), i.coverage))
     end
 
     return coverage_info
