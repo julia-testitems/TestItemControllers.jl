@@ -314,6 +314,59 @@ end
     end
 end
 
+@testitem "Coverage of a function run by one test item has no missed lines" setup=[TestHelpers] begin
+    if VERSION < v"1.11"
+        @test_skip "Coverage mode requires Julia 1.11+"
+    else
+        using TestItemControllers: filepath2uri
+
+        # Julia reports no counts at all for a function that has not been compiled, so
+        # `amend_coverage_from_src!` marks such a function's lines as missed. That used to
+        # run on each test item's coverage before the items were merged. In the item that
+        # did not call a helper, every line of it was marked missed, including the signature
+        # line, which Julia does not instrument for a method that is only ever inlined.
+        # Merged with the item that did call it, that line stayed missed although the whole
+        # helper had run.
+        pkg_path = joinpath(TestHelpers.TESTDATA_DIR, "CoverageMergePackage")
+        discovered = TestHelpers.discover_test_items(pkg_path)
+        @test length(discovered.items) == 2
+
+        coverage_root = filepath2uri(joinpath(pkg_path, "src"))
+
+        result = TestHelpers.run_testrun(
+            discovered.items, discovered.setups, discovered;
+            mode="Coverage",
+            coverage_root_uris=[coverage_root],
+            timeout=600
+        )
+
+        @test length(filter(e -> e.event == :passed, result.events)) == 2
+
+        src_file = joinpath(pkg_path, "src", "CoverageMergePackage.jl")
+        fc = filter(c -> c.uri == filepath2uri(src_file), something(result.coverage, []))
+        @test length(fc) == 1
+
+        cov = fc[1].coverage
+        src_lines = readlines(src_file)
+        function_lines(name) = begin
+            start = findfirst(l -> occursin(r"^(@inline )?function " * name * r"\(", l), src_lines)
+            stop = findnext(==("end"), src_lines, start)
+            return start:stop
+        end
+
+        for name in ("first_helper", "second_helper")
+            counts = [get(cov, l, nothing) for l in function_lines(name)]
+            # Every line is either not code or was hit
+            @test all(c -> c === nothing || c > 0, counts)
+            @test any(c -> c !== nothing && c > 0, counts)
+        end
+
+        # A function no item calls is still reported as missed, not as not code.
+        never = function_lines("never_called")
+        @test any(l -> get(cov, l, nothing) == 0, never)
+    end
+end
+
 @testitem "Coverage counts wider than the platform's Int" begin
     # Julia's coverage counters are 64 bit on every platform, and `jl_write_coverage_data`
     # writes out what they hold — a line in a hot loop passes `typemax(Int32)` easily.
